@@ -27,9 +27,14 @@ interface K2LogConfig {
 }
 
 function readRatatouilleEnv(): K2LogConfig {
-  // In non-Node runtimes (browsers/workers), there is no process.env
-  const ratatouille = (typeof process !== "undefined" && (process as any)?.env?.RATATOUILLE) || "";
-  const raw = String(ratatouille).trim();
+  // Sources (in order): process.env.RATATOUILLE, globalThis.RATATOUILLE
+  let src: unknown = "";
+  if (typeof process !== "undefined" && (process as any)?.env?.RATATOUILLE) {
+    src = (process as any).env.RATATOUILLE;
+  } else if (typeof globalThis !== "undefined" && (globalThis as any)?.RATATOUILLE) {
+    src = (globalThis as any).RATATOUILLE;
+  }
+  const raw = String(src || "").trim();
   if (!raw) return {};
   if (raw === "nocolor") return { color: "off" };
   if (raw === "json") return { format: "json" };
@@ -94,6 +99,40 @@ export function setDebug(value: string | undefined) {
   RT_CFG.filter = value;
   DEBUG_CFG = parseDebugEnv(currentFilterString());
   enabledCache.clear();
+  PRINT_ENABLED = computePrintEnabled();
+}
+
+/** Programmatically configure RATATOUILLE at runtime. Accepts JSON string or partial object. */
+export function configureRatatouille(value: string | Partial<K2LogConfig> | undefined): void {
+  if (value == null) return;
+  let next: Partial<K2LogConfig> | undefined;
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return;
+    if (s === "nocolor") next = { color: "off" };
+    else if (s === "json") next = { format: "json" };
+    else if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+      try { next = (Array.isArray(JSON.parse(s)) ? JSON.parse(s)[0] : JSON.parse(s)) as Partial<K2LogConfig>; } catch { /* ignore */ }
+    }
+  } else if (typeof value === "object") {
+    next = value;
+  }
+  if (!next) return;
+  if (typeof next.color === "string") (RT_CFG as any).color = next.color;
+  if (typeof next.format === "string") (RT_CFG as any).format = next.format;
+  if (typeof next.filter === "string") (RT_CFG as any).filter = next.filter;
+  if (Array.isArray(next.debugVars)) (RT_CFG as any).debugVars = next.debugVars.filter(Boolean);
+  if (typeof next.print === "boolean") (RT_CFG as any).print = next.print;
+  if (next.extra && typeof next.extra === "object") (RT_CFG as any).extra = next.extra;
+  // recompute
+  DEBUG_CFG = parseDebugEnv(currentFilterString());
+  enabledCache.clear();
+  PRINT_ENABLED = computePrintEnabled();
+}
+
+/** Explicitly control printing at runtime (e.g., Workers). */
+export function setPrint(enabled: boolean): void {
+  (RT_CFG as any).print = !!enabled;
   PRINT_ENABLED = computePrintEnabled();
 }
 

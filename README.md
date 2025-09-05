@@ -1,3 +1,39 @@
+# Ratatouille — idea, philosophy & ontology
+
+**Designed for a fast, fire‑hose blast of logs — the flood of everything.**
+
+Ratatouille treats logs like a live market feed, not a database. Producers **speak freely** and emit
+*anything* (strings, blobs, JSON, haiku). There’s no sacred schema or level system to satisfy.
+Topics are just routing hints. The **slow path** is pretty print to the local console for on‑machine
+debugging. The **fast path** is a network fire hose that ships everything out, in memory, with
+backpressure and dropping policies — **nothing touches disk by default**. Persistence only happens
+when **ops** decides to materialize views.
+
+## Core stance
+- **Logs are noise until curated.** Don’t force structure on write. **Schema lives in ops** (schema‑on‑read).
+- **One control surface.** Filters, transforms, sampling and routing live in one place (ops), not sprinkled
+  across apps and agents.
+- **Topics, not taxonomies.** A topic names a stream; it doesn’t define its shape. Mixed content is allowed.
+- **Print is optional.** Console output is for humans; the real business is the network stream.
+- **Diskless by default.** Bounded in‑memory queues, counters, and explicit drop metrics instead of silent
+  blocking or surprise files.
+
+## Why this way?
+- Forced schemas make heterogeneous sources (e.g., HTTPD vs. app transactions) **brittle** and spawn
+  endless per‑source configs. Ratatouille rejects that: **deliver logs as they are**, then let ops
+  carve meaning once, centrally.
+- Late binding means you can **change your mind** about what matters without redeploying code.
+- Minimal hot path (no parsing, no timers) keeps overhead tiny and works in **Node, SSR and workers**.
+
+## What ops gets
+- **Smart filtering** with `DEBUG`‑style allow/deny and wildcards; optional sampling and drop policies.
+- **Selectable output**: pretty text for humans; **JSON lines** for pipes; or forward raw via **Relay**
+  (HTTP/TCP/Workers) to whatever stack you run (Grafana/Loki, Influx, OTLP, S3, …).
+- **Observability of the logger itself**: per‑topic sequence counters and drop counts so you know what
+  was kept, what was shed, and why.
+
+> TL;DR — Devs emit freely. Ops decides what persists. **Fire hose first, persistence by policy.**
+
 # Ratatouille logger
 
 A tiny, flexible debug logger for Node and SSR that’s easy to read in dev and easy to pipe in prod.
@@ -184,6 +220,31 @@ RATATOUILLE='{"format":"json","filter":"*","print":true}' node app.js
 
 # Use DEBUG from env and print by default
 DEBUG=* node app.js
+```
+
+### Cloudflare Workers configuration
+
+In Workers, `RATATOUILLE` defined in `wrangler.toml [vars]` is available as `env.RATATOUILLE` at runtime, not `process.env`. Call `configureRatatouille` once per isolate to apply it:
+
+```ts
+// worker.ts
+import Topic, { configureRatatouille, setDebug, setPrint } from '@frogfish/ratatouille';
+
+let configured = false;
+export default {
+  async fetch(req: Request, env: any, ctx: ExecutionContext) {
+    if (!configured) {
+      // Apply TOML var, e.g., '{"format":"json","filter":"*","print":true}'
+      if (env.RATATOUILLE) configureRatatouille(env.RATATOUILLE);
+      // Or configure explicitly:
+      // setDebug('*'); setPrint(true);
+      configured = true;
+    }
+    const log = Topic('worker');
+    log('hello', { url: req.url });
+    return new Response('ok');
+  }
+}
 ```
 
 # Force JSON logs regardless of TTY

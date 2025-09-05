@@ -12,6 +12,13 @@
 
 ## 0.1.5
 
+## 0.1.6
+
+- Workers config: added `configureRatatouille(value)` to apply config at runtime (accepts JSON string or partial object). Useful to pass `env.RATATOUILLE` from `wrangler.toml`.
+- Printing control API: added `setPrint(boolean)` to explicitly enable/disable console/stderr output at runtime.
+- Config detection: `RATATOUILLE` can also be read from `globalThis.RATATOUILLE` when present.
+- README: added Cloudflare Worker configuration example using `configureRatatouille(env.RATATOUILLE)`.
+
 - Config precedence: added `RATATOUILLE.filter` as the primary filter string; falls back to env vars (e.g., `DEBUG`) only when `filter` is not set.
 - Printing control: new `RATATOUILLE.print` option. Defaults: if `filter` is set and `print` unspecified → do not print; if using env-derived filters (e.g., `DEBUG`) → print by default for debug-compat.
 - API: `setDebug(value)` now sets the primary filter (equivalent to `RATATOUILLE.filter`) and recomputes print behavior.

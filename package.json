@@ -1,6 +1,6 @@
 {
   "name": "@frogfish/ratatouille",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Tiny DEBUG-style topic logger (callable instances).",
   "main": "dist/index.node.js",
   "types": "dist/index.node.d.ts",
