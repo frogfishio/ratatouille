@@ -1,0 +1,35 @@
+{
+  "name": "@frogfish/ratatouille",
+  "version": "0.1.1",
+  "description": "Tiny DEBUG-style topic logger (callable instances).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "DEBUG=* ts-node src/experiment.ts",
+    "start:srv": "RATATOUILLE=json DEBUG=* ts-node src/experiment.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["debug", "logger", "topic", "tiny"],
+  "author": "",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=14"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "ts-node": "^10.9.2"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
