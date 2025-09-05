@@ -154,7 +154,9 @@ RATATOUILLE=json      # structured JSON output
 {
   "color": "auto" | "on" | "off",  // default "auto"
   "format": "text" | "json",        // default "text"
+  "filter": "*,-noisy*",            // primary DEBUG-style filter (preferred over env)
   "debugVars": ["DEBUG", "XYZ"],    // env vars to merge for patterns
+  "print": true | false,             // controls console/stderr printing (see below)
   "extra": { /* reserved for future */ }
 }
 ```
@@ -162,9 +164,27 @@ RATATOUILLE=json      # structured JSON output
 Examples:
 
 ```bash
-# Merge DEBUG + XYZ and disable colors
-RATATOUILLE='{"debugVars":["DEBUG","XYZ"],"color":"off"}' \
-  XYZ=auth* DEBUG=-db* node app.js
+# Set filter in RATATOUILLE (preferred) and disable colors; do not print (default)
+RATATOUILLE='{"filter":"api*,auth*,-auth:noise","color":"off"}' node app.js
+
+# Back-compat: merge DEBUG + XYZ from env if no RATATOUILLE.filter is set
+RATATOUILLE='{"debugVars":["DEBUG","XYZ"]}' XYZ=auth* DEBUG=-db* node app.js
+
+### Printing behavior
+
+- If `RATATOUILLE.print` is set, it takes precedence.
+- If `RATATOUILLE.filter` is set and `print` is not specified, printing defaults to **false** (opt-in). Use this when you intend to forward logs elsewhere (e.g., via Relay) and don’t want console noise.
+- If no `filter` is set and filters are derived from env vars like `DEBUG`, printing defaults to **true** for drop-in compatibility with the `debug` library.
+
+Examples:
+
+```bash
+# Print JSON logs to console (explicit)
+RATATOUILLE='{"format":"json","filter":"*","print":true}' node app.js
+
+# Use DEBUG from env and print by default
+DEBUG=* node app.js
+```
 
 # Force JSON logs regardless of TTY
 RATATOUILLE='{"format":"json"}' DEBUG=api* node app.js

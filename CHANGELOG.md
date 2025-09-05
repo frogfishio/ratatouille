@@ -10,6 +10,13 @@
 
 ## 0.1.4
 
+## 0.1.5
+
+- Config precedence: added `RATATOUILLE.filter` as the primary filter string; falls back to env vars (e.g., `DEBUG`) only when `filter` is not set.
+- Printing control: new `RATATOUILLE.print` option. Defaults: if `filter` is set and `print` unspecified → do not print; if using env-derived filters (e.g., `DEBUG`) → print by default for debug-compat.
+- API: `setDebug(value)` now sets the primary filter (equivalent to `RATATOUILLE.filter`) and recomputes print behavior.
+- README: documented `filter` and `print` options and updated examples; dev script uses RATATOUILLE only.
+
 - Relay sampling: new `sampleRate` option (0..1) in both Node and Worker relays to probabilistically drop lines and control volume.
 - README: added Durable Object aggregator example and Cloudflare Queues producer/consumer pipeline with batching.
 - README: Worker example now shows lazy init with env-bound headers and `ctx.waitUntil(relay.flushNow())`.

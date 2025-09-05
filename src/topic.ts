@@ -20,7 +20,9 @@ const isNode = typeof process !== "undefined" && !!(process as any)?.stderr;
 interface K2LogConfig {
   color?: "auto" | "on" | "off";   // default "auto"
   format?: "text" | "json";         // default "text"
+  filter?: string;                    // primary filter (DEBUG-style patterns)
   debugVars?: string[];               // default ["DEBUG"]
+  print?: boolean;                    // gate console/stderr printing; defaults vary (see below)
   extra?: Record<string, unknown>;    // reserved for future knobs
 }
 
@@ -38,7 +40,9 @@ function readRatatouilleEnv(): K2LogConfig {
       const out: K2LogConfig = {};
       if (typeof cfg?.color === "string") out.color = cfg.color;
       if (typeof cfg?.format === "string") out.format = cfg.format;
+      if (typeof cfg?.filter === "string") out.filter = cfg.filter;
       if (Array.isArray(cfg?.debugVars)) out.debugVars = cfg.debugVars.filter(Boolean);
+      if (typeof cfg?.print === "boolean") out.print = cfg.print;
       if (cfg?.extra && typeof cfg.extra === "object") out.extra = cfg.extra;
       return out;
     } catch {
@@ -57,17 +61,40 @@ const colorsEnabled =
   RT_CFG.color === "on" ? true :
   (isNode && !!(process.stderr as any)?.isTTY && !process.env.NO_COLOR && process.env.FORCE_COLOR !== "0");
 
-function readDebugStrings(): string {
+function readEnvFilters(): string {
   const vars = RT_CFG.debugVars ?? ["DEBUG"]; // allow multiples via RATATOUILLE JSON
   return vars.map((k) => process.env[k as keyof typeof process.env] as string | undefined).filter(Boolean).join(",");
 }
 
-let DEBUG_CFG = parseDebugEnv(isNode ? readDebugStrings() : undefined);
+function currentFilterString(): string | undefined {
+  // Primary: explicit RATATOUILLE.filter; fallback: env vars (DEBUG, etc.) in Node
+  if (typeof RT_CFG.filter === "string" && RT_CFG.filter.trim().length > 0) return RT_CFG.filter;
+  return isNode ? readEnvFilters() : undefined;
+}
+
+let DEBUG_CFG = parseDebugEnv(currentFilterString());
+
+function computePrintEnabled(): boolean {
+  // Explicit override wins
+  if (typeof RT_CFG.print === "boolean") return !!RT_CFG.print;
+  // If RATATOUILLE.filter is set explicitly, default to NOT printing to console
+  const hasFilter = typeof RT_CFG.filter === "string" && RT_CFG.filter.trim().length > 0;
+  if (hasFilter) return false;
+  // Otherwise, if using env-derived filters (e.g., DEBUG), default to printing
+  const envStr = isNode ? readEnvFilters() : undefined;
+  if (envStr && envStr.trim().length > 0) return true;
+  return false;
+}
+
+let PRINT_ENABLED = computePrintEnabled();
 
 /** Recompile DEBUG patterns at runtime (e.g., tests or dynamic flags) */
 export function setDebug(value: string | undefined) {
-  DEBUG_CFG = parseDebugEnv(value ?? (isNode ? readDebugStrings() : undefined));
+  // Treat setDebug as the programmatic way to set the primary filter.
+  RT_CFG.filter = value;
+  DEBUG_CFG = parseDebugEnv(currentFilterString());
   enabledCache.clear();
+  PRINT_ENABLED = computePrintEnabled();
 }
 
 /* Utility: parse and match DEBUG patterns */
@@ -143,6 +170,7 @@ function fmtPart(arg: unknown): string {
 }
 
 function writeLine(s: string) {
+  if (!PRINT_ENABLED) return;
   if (isNode) {
     try {
       process.stderr.write(s + "\n");
