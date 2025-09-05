@@ -246,6 +246,7 @@ type RelayConfig = {
   maxQueue?: number;              // max queued lines before dropping (default 10_000)
   headers?: Record<string,string>;// extra headers for HTTP(S)
   keepAlive?: boolean;            // Node HTTP(S) keep-alive agent (default true). Ignored in Workers.
+  sampleRate?: number;            // 0..1 probability to keep a line (default 1)
 }
 ```
 
@@ -301,6 +302,7 @@ export default {
       relay = new Relay({
         endpoint: "https://logs.example.com/ingest",
         batchMs: 100,
+        sampleRate: 1, // set <1 to reduce volume (e.g., 0.1)
         headers: env.LOG_TOKEN ? { Authorization: `Bearer ${env.LOG_TOKEN}` } : undefined,
       });
       await relay.connect();
@@ -330,6 +332,143 @@ Notes for Workers:
 - When the queue exceeds `maxQueue`, oldest lines are dropped (counter exposed via `status()`).
 - Periodic flush runs every `batchMs`. Call `flushNow()` to push one batch immediately.
 - `close()` stops timers and tears down Node sockets/agents. In Workers, it clears the timer.
+- `sampleRate` drops lines probabilistically to control volume (incrementing `dropped`).
+
+---
+
+## Cloudflare Durable Object Aggregator (near real-time)
+
+For sub-second delivery with connection reuse, front Workers can forward logs to a Durable Object (DO) that batches and relays upstream.
+
+### Durable Object class
+
+```ts
+// do-logger.ts
+export class LogAggregator {
+  state: DurableObjectState;
+  env: any;
+  q: string[] = [];
+  timer: any;
+
+  constructor(state: DurableObjectState, env: any) {
+    this.state = state;
+    this.env = env;
+    this.timer = setInterval(() => this.flush().catch(() => {}), 100);
+  }
+
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    if (req.method === 'POST' && url.pathname === '/log') {
+      const line = await req.text(); // expected to be a single NDJSON line
+      this.q.push(line.endsWith('\n') ? line : line + '\n');
+      return new Response('ok');
+    }
+    if (url.pathname === '/flush') {
+      await this.flush();
+      return new Response('flushed');
+    }
+    return new Response('not found', { status: 404 });
+  }
+
+  private drain(maxBytes = 262_144): string | undefined {
+    if (!this.q.length) return;
+    let bytes = 0;
+    const batch: string[] = [];
+    while (this.q.length && bytes + this.q[0].length <= maxBytes) {
+      const x = this.q.shift()!; batch.push(x); bytes += x.length;
+    }
+    return batch.length ? batch.join('') : undefined;
+  }
+
+  private async flush(): Promise<void> {
+    const data = this.drain();
+    if (!data) return;
+    await fetch(this.env.LOG_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-ndjson', 'Authorization': `Bearer ${this.env.LOG_TOKEN}` },
+      body: data,
+    }).catch(() => {});
+  }
+}
+```
+
+### Frontline Worker usage
+
+```ts
+// worker.ts
+export default {
+  async fetch(req: Request, env: any, ctx: ExecutionContext) {
+    const id = env.LOG_AGGREGATOR.idFromName('logs');
+    const stub = env.LOG_AGGREGATOR.get(id);
+    // one NDJSON line per event
+    const line = JSON.stringify({ ts: Date.now(), url: req.url, method: req.method }) + '\n';
+    ctx.waitUntil(stub.fetch('https://do/log', { method: 'POST', body: line }));
+    return new Response('ok');
+  }
+}
+```
+
+Bindings (wrangler.toml):
+
+```toml
+[[durable_objects.bindings]]
+name = "LOG_AGGREGATOR"
+class_name = "LogAggregator"
+
+[vars]
+LOG_ENDPOINT = "https://logs.example.com/ingest"
+LOG_TOKEN = "..."
+```
+
+---
+
+## Cloudflare Queues Pipeline (decoupled)
+
+If per-request latency should never touch logging, enqueue entries and drain them in a consumer Worker.
+
+### Producer (frontline Worker)
+
+```ts
+export default {
+  async fetch(req: Request, env: any, ctx: ExecutionContext) {
+    const entry = { ts: Date.now(), url: req.url, method: req.method };
+    // Do not await; let the platform handle retries/backpressure
+    ctx.waitUntil(env.LOG_QUEUE.send(entry));
+    return new Response('ok');
+  }
+}
+```
+
+### Consumer Worker
+
+```ts
+import Relay from '@frogfish/ratatouille/relay';
+
+let relay: Relay | undefined;
+
+export default {
+  async queue(batch: MessageBatch<any>, env: any, ctx: ExecutionContext) {
+    if (!relay) {
+      relay = new Relay({ endpoint: env.LOG_ENDPOINT, batchMs: 100, headers: { Authorization: `Bearer ${env.LOG_TOKEN}` } });
+      await relay.connect();
+    }
+    for (const msg of batch.messages) relay.send(msg.body);
+    await relay.flushNow();
+  }
+}
+```
+
+Bindings (wrangler.toml):
+
+```toml
+[[queues.producers]]
+queue = "LOG_QUEUE"
+binding = "LOG_QUEUE"
+
+[[queues.consumers]]
+queue = "LOG_QUEUE"
+script_name = "log-consumer"
+```
 
 ## Pattern syntax (recap)
 

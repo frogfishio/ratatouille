@@ -8,6 +8,7 @@ export interface RelayConfig {
   maxQueue?: number;             // max enqueued lines, default 10_000
   headers?: Record<string,string>; // extra headers for HTTP(S)
   keepAlive?: boolean;           // ignored in Workers; kept for API parity
+  sampleRate?: number;           // 0..1 probability to keep a line (default 1)
 }
 
 const DEFAULTS = {
@@ -15,6 +16,7 @@ const DEFAULTS = {
   batchBytes: 262_144,
   maxQueue: 10_000,
   keepAlive: true,
+  sampleRate: 1,
 };
 
 export class Relay {
@@ -34,6 +36,7 @@ export class Relay {
       maxQueue: cfg.maxQueue ?? DEFAULTS.maxQueue,
       headers: cfg.headers ?? {},
       keepAlive: cfg.keepAlive ?? DEFAULTS.keepAlive,
+      sampleRate: cfg.sampleRate ?? DEFAULTS.sampleRate,
     } as Required<RelayConfig>;
   }
 
@@ -51,6 +54,10 @@ export class Relay {
   /** Enqueue one envelope as NDJSON. Non-blocking; drops when full. */
   send(payload: object): void {
     if (this.closed) return;
+    if (this.config.sampleRate < 1 && Math.random() >= this.config.sampleRate) {
+      this.dropped++;
+      return;
+    }
     const line = JSON.stringify(payload) + "\n";
     if (line.length > this.config.batchBytes) { this.dropped++; return; }
     this.q.push(line);
