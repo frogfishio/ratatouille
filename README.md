@@ -27,7 +27,11 @@ pnpm add @frogfish/ratatouille
 ## Quick start
 
 ```ts
+// ESM default import
 import Topic from "@frogfish/ratatouille"; // or "./src/topic"
+
+// Or named import
+// import { Topic } from "@frogfish/ratatouille";
 
 // Plain topic
 const log = Topic("debug", { svc: "api" });
@@ -194,6 +198,17 @@ const debug = Topic("debug#random", { svc: "api" });
 if (debug.enabled) {
   debug("starting", { port: 8080 });
 }
+```
+
+### Alternative imports
+
+```ts
+// Named Topic
+import { Topic } from "@frogfish/ratatouille";
+const log = Topic("api");
+
+// Access Relay and setDebug
+import Topic, { setDebug, Relay } from "@frogfish/ratatouille";
 ```
 
 ### `setDebug(value?: string): void`
