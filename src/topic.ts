@@ -25,7 +25,9 @@ interface K2LogConfig {
 }
 
 function readRatatouilleEnv(): K2LogConfig {
-  const raw = (process.env.RATATOUILLE || "").trim();
+  // In non-Node runtimes (browsers/workers), there is no process.env
+  const ratatouille = (typeof process !== "undefined" && (process as any)?.env?.RATATOUILLE) || "";
+  const raw = String(ratatouille).trim();
   if (!raw) return {};
   if (raw === "nocolor") return { color: "off" };
   if (raw === "json") return { format: "json" };
@@ -117,23 +119,23 @@ function fmtPart(arg: unknown): string {
   if (typeof arg === "string") return arg;
   if (typeof arg === "number" || typeof arg === "boolean") return String(arg);
   if (arg instanceof Error) return (arg as Error).stack ? (arg as Error).stack as string : `${(arg as Error).name}: ${(arg as Error).message}`;
-  // Prefer util.inspect in Node for richer output; fall back to JSON
-  let utilInspect: ((obj: any, options?: any) => string) | undefined;
-  if (isNode) {
-    try {
-      // @ts-ignore optional during non-Node builds
-      const util = require("node:util");
-      utilInspect = util.inspect;
-    } catch {}
-  }
-  try {
-    if (utilInspect) {
-      return utilInspect(arg, { depth: 4, maxArrayLength: 50, breakLength: 120 });
+  // Lightweight safe stringify without Node's util.inspect to stay platform-neutral
+  const seen = new WeakSet();
+  const replacer = (_k: string, v: unknown) => {
+    if (v instanceof Error) return { name: v.name, message: v.message, stack: v.stack };
+    if (typeof v === "object" && v !== null) {
+      if (seen.has(v as object)) return "[Circular]";
+      seen.add(v as object);
     }
-    return JSON.stringify(arg);
+    if (typeof v === "function") return `[Function ${(v as Function).name || "anonymous"}]`;
+    if (typeof v === "symbol") return v.toString();
+    return v as any;
+  };
+  try {
+    return JSON.stringify(arg, replacer);
   } catch {
     try {
-      return JSON.stringify(arg);
+      return String(arg);
     } catch {
       return "[unserializable]";
     }

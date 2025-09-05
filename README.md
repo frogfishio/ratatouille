@@ -124,7 +124,7 @@ Color output toggles:
 ```
 - `#SEQ` is a zero‑padded per‑topic sequence (`#000001`).
 - `meta` and each argument are pretty‑printed:
-  - Uses `util.inspect` in Node (`depth=4`), falls back to `JSON.stringify`.
+  - Uses a safe JSON replacer (handles circular refs, Error objects).
   - `Error` instances print `.stack` if present (else `name: message`).
 
 ### JSON lines
@@ -220,6 +220,116 @@ Recompile filter patterns at runtime.
 Useful in tests or REPLs that toggle logging on the fly.
 
 ---
+
+## Relay (shipping logs)
+
+Use `Relay` to batch and forward logs to a collector. It supports two runtimes:
+
+- Node: TCP (`tcp://host:port`) and HTTP(S) with keep‑alive.
+- Cloudflare Workers/Browser: HTTP(S) via `fetch` (no TCP; keep‑alive not user‑controlled).
+
+### Install/import
+
+- Node (first‑class):
+  - `import { Relay } from "@frogfish/ratatouille"`  // root export includes Relay in Node
+  - or `import Relay from "@frogfish/ratatouille/relay"`
+- Cloudflare Worker / Browser:
+  - `import Relay from "@frogfish/ratatouille/relay"`  // resolves to the Worker variant
+
+### Config
+
+```ts
+type RelayConfig = {
+  endpoint: string;               // "tcp://host:port" (Node) or "https://…"
+  batchMs?: number;               // flush interval (default 100)
+  batchBytes?: number;            // max bytes per batch (default 262_144)
+  maxQueue?: number;              // max queued lines before dropping (default 10_000)
+  headers?: Record<string,string>;// extra headers for HTTP(S)
+  keepAlive?: boolean;            // Node HTTP(S) keep-alive agent (default true). Ignored in Workers.
+}
+```
+
+### Node example (HTTP keep‑alive)
+
+```ts
+import { Relay } from "@frogfish/ratatouille";
+
+const relay = new Relay({
+  endpoint: "https://logs.example.com/ingest",
+  keepAlive: true,               // enables Node http(s).Agent keep-alive
+  batchMs: 100,                  // send every ~100ms
+  headers: { Authorization: `Bearer ${process.env.LOG_TOKEN}` },
+});
+
+await relay.connect();
+
+// emit logs
+relay.send({ level: "info", msg: "service started" });
+
+// flush at checkpoints
+await relay.flushNow();
+
+// on shutdown
+process.on("SIGINT", async () => {
+  await relay.flushNow();
+  relay.close();
+  process.exit(0);
+});
+```
+
+### Node example (TCP)
+
+```ts
+import { Relay } from "@frogfish/ratatouille";
+
+const relay = new Relay("tcp://collector.internal:5001");
+await relay.connect();
+relay.send({ level: "warn", msg: "hot path" });
+```
+
+### Cloudflare Worker example (HTTP, batched)
+
+```ts
+// worker.ts
+import Relay from "@frogfish/ratatouille/relay"; // Worker variant (fetch-based)
+
+let relay: Relay | undefined; // lazily initialize with env-bound headers
+
+export default {
+  async fetch(req: Request, env: any, ctx: ExecutionContext) {
+    if (!relay) {
+      relay = new Relay({
+        endpoint: "https://logs.example.com/ingest",
+        batchMs: 100,
+        headers: env.LOG_TOKEN ? { Authorization: `Bearer ${env.LOG_TOKEN}` } : undefined,
+      });
+      await relay.connect();
+    }
+
+    // enqueue structured log lines (non-blocking)
+    relay.send({ ts: Date.now(), url: req.url, method: req.method });
+
+    // ensure at least one batch is pushed even if the isolate goes idle soon
+    ctx.waitUntil(relay.flushNow());
+    return new Response("ok");
+  }
+};
+```
+
+Notes for Workers:
+
+- Only `http(s)://` endpoints are supported (no raw TCP sockets).
+- The platform may reuse connections under the hood (HTTP/1.1 persistent or HTTP/2), but keep‑alive is not configurable.
+- Create a singleton Relay at module scope; avoid per‑request construction.
+- Tune `batchMs` / `batchBytes` for your delivery/overhead trade‑off.
+
+### Behavior
+
+- `send(payload)` enqueues a single NDJSON line (object → JSON + `\n`).
+- Batches are limited by `batchBytes`; oversized single lines are dropped early.
+- When the queue exceeds `maxQueue`, oldest lines are dropped (counter exposed via `status()`).
+- Periodic flush runs every `batchMs`. Call `flushNow()` to push one batch immediately.
+- `close()` stops timers and tears down Node sockets/agents. In Workers, it clears the timer.
 
 ## Pattern syntax (recap)
 

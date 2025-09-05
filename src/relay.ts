@@ -84,9 +84,9 @@ export class Relay {
     }
   }
 
-  /** Drain up to batchBytes and send once. */
-  private flush(): void {
-    if (this.closed || this.q.length === 0) return;
+  /** Drain a batch from the queue up to batchBytes. Returns NDJSON payload or undefined if empty. */
+  private drainBatch(): string | undefined {
+    if (this.q.length === 0) return undefined;
     let bytes = 0;
     const batch: string[] = [];
     while (this.q.length && bytes + this.q[0].length <= this.config.batchBytes) {
@@ -95,9 +95,15 @@ export class Relay {
       bytes += line.length;
     }
     this.queuedBytes -= bytes;
-    if (batch.length === 0) return;
+    if (batch.length === 0) return undefined;
+    return batch.join("");
+  }
 
-    const data = batch.join("");
+  /** Drain up to batchBytes and send once. */
+  private flush(): void {
+    if (this.closed) return;
+    const data = this.drainBatch();
+    if (!data) return;
     const { endpoint } = this.config;
 
     if (endpoint.startsWith("tcp://") && this.socket) {
@@ -121,6 +127,49 @@ export class Relay {
       req.on("error", () => { /* ignore in emitter */ });
       req.write(data);
       req.end();
+      return;
+    }
+  }
+
+  /** Flush one batch immediately and resolve when send attempt completes. */
+  async flushNow(): Promise<void> {
+    if (this.closed) return;
+    const data = this.drainBatch();
+    if (!data) return;
+    const { endpoint } = this.config;
+
+    if (endpoint.startsWith("tcp://") && this.socket) {
+      await new Promise<void>((resolve) => {
+        try {
+          this.socket!.write(data, () => resolve());
+        } catch {
+          resolve();
+        }
+      });
+      return;
+    }
+
+    if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+      const isHttps = endpoint.startsWith("https://");
+      const mod = isHttps ? https : http;
+      await new Promise<void>((resolve) => {
+        try {
+          const req = mod.request(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-ndjson",
+              "Content-Length": Buffer.byteLength(data),
+              ...this.config.headers,
+            },
+            agent: this.httpAgent,
+          }, () => resolve());
+          req.on("error", () => resolve());
+          req.write(data);
+          req.end();
+        } catch {
+          resolve();
+        }
+      });
       return;
     }
   }
