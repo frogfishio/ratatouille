@@ -256,14 +256,17 @@ RATATOUILLE='{"format":"json"}' DEBUG=api* node app.js
 ## API reference
 
 ```ts
-import Topic, { setDebug } from "@frogfish/ratatouille"; // or from "./src/topic"
+import Topic, { setDebug, configureRatatouille, setPrint } from "@frogfish/ratatouille"; // or from "./src/topic"
 ```
 
-### `Topic(name: string, meta?: Record<string, unknown>): TopicCallable`
-Creates a **callable logger** bound to a topic.
+### `Topic(name: string, config?: { meta?, env?, print? } | meta): TopicCallable`
+Creates a **callable logger** bound to a topic. Second argument is a config object or legacy `meta`.
 
 - `name`: may include an inline color suffix: `"topic#ff00aa"`, `"topic#red"`, `"topic#random"`.
-- `meta`: optional object printed once per line after the topic.
+- `config.meta`: optional object printed once per line after the topic.
+- `config.env`: optional environment snapshot added to each line (JSON: `env` field; text: appended after meta).
+- `config.print`: per-topic print override; forces/suppresses console output for this topic.
+- Back‑compat: passing a plain object as the second arg is treated as `meta`.
 
 **Returns** a function `(...args: unknown[]) => void` with properties:
 
@@ -275,10 +278,76 @@ Creates a **callable logger** bound to a topic.
 Usage:
 
 ```ts
-const debug = Topic("debug#random", { svc: "api" });
+const debug = Topic("debug#random", { meta: { svc: "api" }, env: { region: "iad" }, print: true });
 if (debug.enabled) {
   debug("starting", { port: 8080 });
 }
+
+// Extend: attach a non-blocking handler that receives JSON envelopes
+debug.extend((e) => {
+  // e: { ts, seq, topic, meta, args, env }
+  // Forward to legacy/bespoke loggers without blocking the request path
+  console.log(`[legacy] ${e.topic}#${e.seq} ${JSON.stringify(e)}`);
+});
+
+### Extensions (bridge to legacy loggers)
+
+Use `extend(handler, alsoPrint?)` to plug in bespoke or legacy logging without changing call sites.
+
+- Signature: `extend((envelope) => void, alsoPrint?: boolean)`
+- Envelope: `{ ts, seq, topic, meta, args, env }` (what JSON mode would emit)
+- Non-blocking: handlers run on a timer/microtask to keep the hot path fast.
+- Gating: extensions run only when the topic would print (i.e., filter matches and print gate allows).
+
+Behavior rules:
+- No extensions attached → normal printing (if enabled).
+- At least one extension attached with `alsoPrint=false` (default) → printing is suppressed; only your handlers run.
+- If any extension sets `alsoPrint=true` → both printing happens and all handlers run.
+
+Why this design?
+- Lets you “take over” output and route it elsewhere (e.g., log4js, winston, analytics) without double-printing.
+- Gives an opt-in to keep local printing for dev while still forwarding to your sinks.
+
+Examples
+
+1) Replace printing with a custom sink
+
+```ts
+const log = Topic('api', { meta: { svc: 'api' } })
+  .extend((e) => myLegacySink(e)); // no console printing
+
+log('user login', { id: 42 });
+```
+
+2) Print locally and forward
+
+```ts
+const log = Topic('api', { meta: { svc: 'api' } })
+  .extend((e) => myLegacySink(e), true); // print + handler
+
+log('started');
+```
+
+3) Force extensions to run even when global print is disabled
+
+```ts
+// Global printing off (e.g., RATATOUILLE.filter set, print omitted)
+// Make this topic eligible by forcing per-topic print, but suppress local printing via extend default
+const log = Topic('api', { print: true }).extend((e) => mySink(e));
+log('event'); // handler runs, console stays quiet
+```
+
+4) Use env/meta to implement levels or routing in the handler
+
+```ts
+const warn = Topic('app', { meta: { level: 'warn' }, env: { region: 'iad' } })
+  .extend((e) => {
+    if ((e.meta as any)?.level === 'warn') legacy.warn(e);
+    else legacy.info(e);
+  });
+
+warn('cpu high', { usage: 0.92 });
+```
 ```
 
 ### Alternative imports

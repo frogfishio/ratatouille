@@ -14,6 +14,15 @@
 
 ## 0.1.6
 
+## 0.1.7
+
+- Topic.extend: added `extend(handler, alsoPrint?)` hook.
+  - Default `alsoPrint=false`: extensions replace local printing (only handlers run).
+  - If any attached extension uses `alsoPrint=true`: both print and invoke handlers.
+  - Extensions fire only when the topic would print (filters + print gate allow).
+- Topic options: documented `env` inclusion and per-topic `print` override; envelope type exported as `LogEnvelope`.
+- README: extended with rationale and detailed examples for extensions.
+
 - Workers config: added `configureRatatouille(value)` to apply config at runtime (accepts JSON string or partial object). Useful to pass `env.RATATOUILLE` from `wrangler.toml`.
 - Printing control API: added `setPrint(boolean)` to explicitly enable/disable console/stderr output at runtime.
 - Config detection: `RATATOUILLE` can also be read from `globalThis.RATATOUILLE` when present.

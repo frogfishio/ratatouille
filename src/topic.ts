@@ -208,8 +208,8 @@ function fmtPart(arg: unknown): string {
   }
 }
 
-function writeLine(s: string) {
-  if (!PRINT_ENABLED) return;
+function writeLine(s: string, force = false) {
+  if (!PRINT_ENABLED && !force) return;
   if (isNode) {
     try {
       process.stderr.write(s + "\n");
@@ -231,10 +231,11 @@ function padSeq(n: number, width = 6): string {
   return s.length >= width ? s : "0".repeat(width - s.length) + s;
 }
 
-function writeJsonLine(seq: number, topic: string, meta: unknown, args: unknown[]) {
+function writeJsonLine(seq: number, topic: string, meta: unknown, args: unknown[], env?: unknown, force = false) {
   const payload: Record<string, unknown> = { ts: nowIso(), seq, topic, meta: meta ?? null, args };
+  if (typeof env !== "undefined") payload.env = env;
   try {
-    writeLine(JSON.stringify(payload));
+    writeLine(JSON.stringify(payload), force);
   } catch {
     const seen = new WeakSet();
     const safe = JSON.stringify(payload, (_k, v) => {
@@ -245,7 +246,7 @@ function writeJsonLine(seq: number, topic: string, meta: unknown, args: unknown[
       }
       return v;
     });
-    writeLine(safe);
+    writeLine(safe, force);
   }
 }
 
@@ -322,6 +323,19 @@ function colorizeTopic(name: string, color?: { r: number; g: number; b: number }
 }
 
 export type TopicMeta = Record<string, unknown> | undefined;
+export interface LogEnvelope {
+  ts: string;
+  seq: number;
+  topic: string;
+  meta: unknown;
+  args: unknown[];
+  env?: unknown;
+}
+export interface TopicOptions {
+  meta?: TopicMeta;           // user-supplied metadata to print with each line
+  env?: unknown;              // environment snapshot to include (e.g., Worker env)
+  print?: boolean;            // per-topic print override (forces or suppresses)
+}
 
 export interface TopicCallable {
   (...args: unknown[]): void;
@@ -329,50 +343,96 @@ export interface TopicCallable {
   meta?: TopicMeta;
   /** Whether local DEBUG printing is enabled for this topic */
   readonly enabled: boolean;
+  /** Attach a non-blocking handler for JSON envelopes; returns the same callable for chaining.
+   * If any handler is attached with alsoPrint=false (default), printing is suppressed and only handlers run.
+   * If at least one handler is attached with alsoPrint=true, printing happens as well as handlers.
+   */
+  extend(handler: (envelope: LogEnvelope) => void, alsoPrint?: boolean): TopicCallable;
 }
 
 export interface TopicConstructor {
-  new (name: string, meta?: TopicMeta): TopicCallable;
-  (name: string, meta?: TopicMeta): TopicCallable;
+  new (name: string, config?: TopicOptions | TopicMeta): TopicCallable;
+  (name: string, config?: TopicOptions | TopicMeta): TopicCallable;
 }
 
-function createCallableTopic(name: string, meta?: TopicMeta): TopicCallable {
+function normalizeOptions(config?: TopicOptions | TopicMeta): TopicOptions | undefined {
+  if (config == null) return undefined;
+  if (typeof config === "object" && ("meta" in (config as any) || "env" in (config as any) || "print" in (config as any))) {
+    return config as TopicOptions;
+  }
+  // Back-compat: bare meta becomes { meta }
+  return { meta: config as TopicMeta } as TopicOptions;
+}
+
+function createCallableTopic(name: string, config?: TopicOptions | TopicMeta): TopicCallable {
   const parsed = parseTopicSpec(name);
   const baseName = parsed.name;
   const explicitColor = parsed.color;
+  const opts = normalizeOptions(config) || {};
+  const perTopicPrint = typeof opts.print === "boolean" ? opts.print : undefined;
 
   let seq = 0;
+  const extensions: Array<{ fn: (e: LogEnvelope) => void; alsoPrint: boolean } > = [];
+
+  let self: TopicCallable; // will assign after proxy creation
 
   const fn = ((...args: unknown[]) => {
     if (!isEnabledFor(baseName)) return; // no-op when DEBUG doesn’t match
     const n = ++seq;
-    if ((RT_CFG.format ?? "text") === "json") {
-      writeJsonLine(n, baseName, meta, args);
-      return;
-    }
+    // Determine if we would print at all (global gate and per-topic override)
+    const force = perTopicPrint === true;
+    const suppress = perTopicPrint === false;
+    const wouldPrint = suppress ? false : (force ? true : PRINT_ENABLED);
+    if (!wouldPrint) return; // if we wouldn't print, we also don't call extensions
     const ts = nowIso();
-    const head = `[${ts} #${padSeq(n)}] ${colorizeTopic(baseName, explicitColor)}`;
-    const pieces = args.map((a) => fmtPart(a));
-    const metaStr = meta ? ` ${fmtPart(meta)}` : "";
-    const line = `${head}${metaStr} — ${pieces.join(" ")}`;
-    writeLine(line);
+    const envelope: LogEnvelope = { ts, seq: n, topic: baseName, meta: opts.meta ?? null, args, env: opts.env };
+    // Fire-and-forget extension handlers (only when we would print)
+    if (extensions.length) {
+      const call = () => {
+        for (const h of extensions) {
+          try { h.fn(envelope); } catch { /* ignore */ }
+        }
+      };
+      try { setTimeout(call, 0); } catch { try { queueMicrotask(call); } catch { /* ignore */ } }
+    }
+    // Decide whether to perform local printing too
+    const shouldAlsoPrint = extensions.length === 0 || extensions.some((h) => h.alsoPrint);
+    if (shouldAlsoPrint) {
+      if ((RT_CFG.format ?? "text") === "json") {
+        writeJsonLine(n, baseName, opts.meta, args, opts.env, force);
+      } else {
+        const head = `[${ts} #${padSeq(n)}] ${colorizeTopic(baseName, explicitColor)}`;
+        const pieces = args.map((a) => fmtPart(a));
+        const metaStr = opts.meta ? ` ${fmtPart(opts.meta)}` : "";
+        const envStr = typeof opts.env !== "undefined" ? ` ${fmtPart(opts.env)}` : "";
+        const line = `${head}${metaStr}${envStr} — ${pieces.join(" ")}`;
+        writeLine(line, force);
+      }
+    }
   }) as TopicCallable;
 
-  return new Proxy(fn, {
+  self = new Proxy(fn, {
     get: (t, prop) => {
       if (prop === "topic") return baseName;
-      if (prop === "meta") return meta;
+      if (prop === "meta") return opts.meta;
       if (prop === "enabled") return isEnabledFor(baseName);
       if (prop === "seq") return seq;
+      if (prop === "extend") return (handler: (e: LogEnvelope) => void, alsoPrint: boolean = false) => {
+        if (typeof handler === "function") extensions.push({ fn: handler, alsoPrint: !!alsoPrint });
+        return self;
+      };
       // fall back to function props (e.g., length, name)
       // @ts-ignore - allow passthrough to function properties
       return (t as any)[prop];
     },
   });
+
+  return self;
 }
 
 export const Topic: TopicConstructor = function (this: unknown, name: string, meta?: TopicMeta): TopicCallable {
-  return createCallableTopic(name, meta);
+  // Note: second arg may be legacy meta or a config object
+  return createCallableTopic(name, meta as any);
 } as unknown as TopicConstructor;
 
 export default Topic;
