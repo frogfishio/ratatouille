@@ -1,59 +1,62 @@
 {
   "name": "@frogfish/ratatouille",
-  "version": "0.1.7",
-  "description": "Tiny DEBUG-style topic logger (callable instances).",
-  "main": "dist/index.node.js",
-  "types": "dist/index.node.d.ts",
+  "version": "1.0.0",
+  "description": "Best-effort telemetry firehose with NDJSON Relay sinks (Node + Workers) and optional local printing.",
+  "license": "GPL-3.0-only",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "sideEffects": false,
   "files": [
     "dist",
     "README.md",
     "LICENSE"
   ],
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "DEBUG=* ts-node src/experiment.ts",
-    "start:srv": "RATATOUILLE='{\"format\":\"json\",\"filter\":\"*\",\"print\":true}' ts-node src/experiment.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.json",
-    "prepublishOnly": "npm run build"
-  },
-  "keywords": ["debug", "logger", "topic", "tiny"],
-  "author": "",
-  "license": "GPL-3.0-only",
-  "engines": {
-    "node": ">=14"
-  },
-  "devDependencies": {
-    "@types/node": "^24.3.1",
-    "ts-node": "^10.9.2"
-  },
+  "main": "./dist/index.node.cjs",
+  "module": "./dist/index.node.js",
+  "types": "./dist/index.node.d.ts",
   "exports": {
     ".": {
       "browser": {
         "types": "./dist/index.browser.d.ts",
-        "import": "./dist/index.browser.js",
-        "default": "./dist/index.browser.js"
+        "import": "./dist/index.browser.js"
       },
       "types": "./dist/index.node.d.ts",
       "import": "./dist/index.node.js",
-      "require": "./dist/index.node.js",
-      "default": "./dist/index.node.js"
+      "require": "./dist/index.node.cjs"
     },
     "./relay": {
       "browser": {
         "types": "./dist/relay.worker.d.ts",
-        "import": "./dist/relay.worker.js",
-        "default": "./dist/relay.worker.js"
+        "import": "./dist/relay.worker.js"
       },
       "types": "./dist/relay.d.ts",
       "import": "./dist/relay.js",
-      "require": "./dist/relay.js",
-      "default": "./dist/relay.js"
+      "require": "./dist/relay.cjs"
     }
   },
-  "browser": {
-    "./dist/relay.js": "./dist/relay.worker.js"
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsup",
+    "dev": "tsup --watch",
+    "prepublishOnly": "npm run build"
   },
-  "publishConfig": {
-    "access": "public"
+  "keywords": [
+    "telemetry",
+    "firehose",
+    "ndjson",
+    "relay",
+    "workers",
+    "logging",
+    "debug"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.4",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
   }
 }

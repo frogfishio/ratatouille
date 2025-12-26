@@ -23,7 +23,7 @@ when **ops** decides to materialize views.
   endless per‑source configs. Ratatouille rejects that: **deliver logs as they are**, then let ops
   carve meaning once, centrally.
 - Late binding means you can **change your mind** about what matters without redeploying code.
-- Minimal hot path (no parsing, no timers) keeps overhead tiny and works in **Node, SSR and workers**.
+- Minimal Topic hot path (no parsing, no timers on the emission path) keeps overhead tiny and works in **Node, SSR and workers**. (Sinks like Relay may use timers for batching.)
 
 ## What ops gets
 - **Smart filtering** with `DEBUG`‑style allow/deny and wildcards; optional sampling and drop policies.
@@ -32,7 +32,59 @@ when **ops** decides to materialize views.
 - **Observability of the logger itself**: per‑topic sequence counters and drop counts so you know what
   was kept, what was shed, and why.
 
-> TL;DR — Devs emit freely. Ops decides what persists. **Fire hose first, persistence by policy.**
+
+
+## What Ratatouille is not
+
+Ratatouille is **not** a traditional structured logging framework (log4j/log4js/winston/pino-style).
+
+- No log levels as a first-class concept ("error" can be a topic, not a stream).
+- No promise of durability, ordering, or delivery. This is **telemetry**, not an audit trail.
+- No enforced schema. Producers can emit anything; consumers decide what to keep.
+
+If something is **critical**, do not put it in logs. Use a separate audit/event system.
+
+
+## What problem this solves
+
+When you have **hundreds of log producers** (autoscaled microservices across Workers/Lambda/K8s/Nomad), "just print to stdout" turns into:
+
+- too much volume
+- too much cost
+- too much noise
+- too little traceability
+
+Ratatouille is built for the *fire-hose reality*: producers emit freely, a sink ships the stream to a concentrator/queue, and consumers mine it later.
+
+## Architecture
+
+Two keywords:
+
+1. **Insane speed**
+2. **Never unencrypted at rest**
+
+A typical deployment looks like:
+
+`producer → triager (TLS/auth, optional) → queue → consumer`
+
+- **Producers** (apps/workers) emit a fire-hose stream.
+- **Triager** is an HTTPS tunnel/edge that terminates TLS, authenticates, and forwards bytes. (It does not parse.)
+- **Queue** (e.g., SegQ or similar) durably buffers the stream for fan-out. If it writes to disk, it must be **encrypted at rest**.
+- **Consumers** read from the queue and decide what to keep, index, sample, or drop.
+
+The design goal is that logs are **data in transit**. If they ever touch disk in the pipeline, they do so **encrypted**, which helps with GDPR-style risk: you avoid piles of plaintext log files sitting around on nodes.
+
+## Logs are not transactional data
+
+Logs are **best-effort telemetry**. They can drop.
+
+Do **not** use logs to represent important state like:
+
+- "X made a purchase"
+- "payment succeeded"
+- "user permissions changed"
+
+Those belong in an **audit/event** system with durability, idempotency, and query guarantees.
 
 # Ratatouille logger
 
@@ -89,15 +141,23 @@ api("picked a deterministic 256‑color for 'api'");
 Output (text mode):
 
 ```
-[2025-09-05T01:23:45.678Z #000001] debug — hello world { user: 'alice' } { requestId: 123 } extra arg
+[2025-09-05T01:23:45.678Z #000001] debug — hello world {"user":"alice"} {"requestId":123} extra arg
 [2025-09-05T01:23:45.790Z #000002] debug — …
 ```
 
 ---
 
-## Enabling topics with `DEBUG`
+## Filtering and local printing
 
-Ratatouille uses `DEBUG`-style matching (like the popular `debug` package).
+Ratatouille has two ideas:
+
+- **Emission filter**: which topics exist (and therefore reach sinks).
+- **Local printing**: a developer convenience so you can see what's happening while coding.
+
+Today the filter syntax is **DEBUG-style** (wildcards, allow/deny). `DEBUG=...` is supported mainly as a
+compatibility shim for local dev workflows.
+
+The canonical control surface is `RATATOUILLE` (especially `RATATOUILLE.filter`).
 
 - Patterns are separated by **commas or whitespace**.
 - `*` is a wildcard; `-` negates a pattern.
@@ -209,8 +269,11 @@ RATATOUILLE='{"debugVars":["DEBUG","XYZ"]}' XYZ=auth* DEBUG=-db* node app.js
 ### Printing behavior
 
 - If `RATATOUILLE.print` is set, it takes precedence.
-- If `RATATOUILLE.filter` is set and `print` is not specified, printing defaults to **false** (opt-in). Use this when you intend to forward logs elsewhere (e.g., via Relay) and don’t want console noise.
-- If no `filter` is set and filters are derived from env vars like `DEBUG`, printing defaults to **true** for drop-in compatibility with the `debug` library.
+- Printing is a **developer convenience** (a local PrintSink). Sinks (e.g., `Relay`) are the core fire-hose.
+- If any sink is attached, printing is suppressed by default to avoid double-output.
+  A sink can opt-in to printing via `alsoPrint=true`.
+- If `RATATOUILLE.filter` is set and `print` is not specified, printing defaults to **false** (opt-in).
+- If no `filter` is set and filters are derived from env vars like `DEBUG`, printing defaults to **true** for drop-in compatibility.
 
 Examples:
 
@@ -297,12 +360,12 @@ Use `extend(handler, alsoPrint?)` to plug in bespoke or legacy logging without c
 - Signature: `extend((envelope) => void, alsoPrint?: boolean)`
 - Envelope: `{ ts, seq, topic, meta, args, env }` (what JSON mode would emit)
 - Non-blocking: handlers run on a timer/microtask to keep the hot path fast.
-- Gating: extensions run only when the topic would print (i.e., filter matches and print gate allows).
+- Gating: handlers represent sinks. They run whenever the topic is enabled by filters, independent of local printing.
 
 Behavior rules:
-- No extensions attached → normal printing (if enabled).
-- At least one extension attached with `alsoPrint=false` (default) → printing is suppressed; only your handlers run.
-- If any extension sets `alsoPrint=true` → both printing happens and all handlers run.
+- No sinks attached → normal printing (subject to filters and print gate).
+- If any sink is attached with `alsoPrint=false` (default) → printing is suppressed; only sinks run.
+- If any sink sets `alsoPrint=true` → sinks run and local printing also happens (subject to the print gate).
 
 Why this design?
 - Lets you “take over” output and route it elsewhere (e.g., log4js, winston, analytics) without double-printing.
@@ -390,13 +453,21 @@ Use `Relay` to batch and forward logs to a collector. It supports two runtimes:
 
 ```ts
 type RelayConfig = {
-  endpoint: string;               // "tcp://host:port" (Node) or "https://…"
+  endpoint: string;               // "tcp://host:port" (Node) or "https://…" (Workers)
   batchMs?: number;               // flush interval (default 100)
   batchBytes?: number;            // max bytes per batch (default 262_144)
-  maxQueue?: number;              // max queued lines before dropping (default 10_000)
+
+  // Bounded memory (best-effort telemetry)
+  maxQueueBytes?: number;         // max buffered bytes (default 5MB)
+  maxQueue?: number;              // max buffered lines (default 10_000)
+  dropPolicy?: "drop_oldest" | "drop_newest"; // default "drop_oldest"
+
   headers?: Record<string,string>;// extra headers for HTTP(S)
   keepAlive?: boolean;            // Node HTTP(S) keep-alive agent (default true). Ignored in Workers.
   sampleRate?: number;            // 0..1 probability to keep a line (default 1)
+
+  // Optional encoder override for `send(payload)`
+  encode?: (payload: unknown) => string;
 }
 ```
 
@@ -463,10 +534,16 @@ export default {
 
     // ensure at least one batch is pushed even if the isolate goes idle soon
     ctx.waitUntil(relay.flushNow());
+
+
+
     return new Response("ok");
   }
 };
 ```
+
+`setInterval` timers are not a delivery guarantee in Workers (isolates can go idle). `ctx.waitUntil(relay.flushNow())` is the best-effort way to push at least one batch.
+
 
 Notes for Workers:
 
@@ -477,12 +554,13 @@ Notes for Workers:
 
 ### Behavior
 
-- `send(payload)` enqueues a single NDJSON line (object → JSON + `\n`).
-- Batches are limited by `batchBytes`; oversized single lines are dropped early.
-- When the queue exceeds `maxQueue`, oldest lines are dropped (counter exposed via `status()`).
+- `send(payload)` enqueues one NDJSON line (object → JSON + `\n`, or via `encode`).
+- `sendLine(line)` enqueues a pre-formatted NDJSON line (adds trailing `\n` if missing).
+- `sendChunk(chunk)` enqueues a pre-formatted NDJSON chunk (may contain multiple lines). No parsing/validation.
+- Batches are limited by `batchBytes`; oversized single lines/chunks are dropped early.
+- The queue is bounded by `maxQueueBytes` (primary) and `maxQueue` (secondary). When full, items are dropped per `dropPolicy`.
 - Periodic flush runs every `batchMs`. Call `flushNow()` to push one batch immediately.
-- `close()` stops timers and tears down Node sockets/agents. In Workers, it clears the timer.
-- `sampleRate` drops lines probabilistically to control volume (incrementing `dropped`).
+- `status()` exposes lightweight counters (queued bytes/items, dropped bytes/items, sent bytes/batches, failures).
 
 ---
 
@@ -660,10 +738,11 @@ node app.js
 
 ## Behavior & internals
 
-- **No background timers** — logs are written synchronously to `stderr` (Node) or `console.error` (browsers/workers).
-- **Error printing** — prints `err.stack` when available; otherwise `name: message`.
-- **Portability** — guards `process` and `stderr`. If not present, falls back to `console.error`.
-- **Performance** — precompiles allow/deny regexes; caches `enabled` decisions per topic; minimal stringification.
+- **Topic hot path is tiny** — Topic emission does no I/O unless local printing is enabled.
+- **Printing** — writes synchronously to **stdout** in Node (fast stream write) and uses `console.log` elsewhere (Workers/browsers).
+- **Sinks (Relay)** — use a bounded in-memory queue plus a periodic flush timer (`batchMs`). Best-effort; drops are explicit.
+- **Error rendering** — `Error` instances print `.stack` when available; otherwise `name: message`.
+- **Performance** — precompiles allow/deny regexes; caches enabled decisions per topic; minimal stringification.
 
 ---
 

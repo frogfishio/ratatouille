@@ -10,11 +10,17 @@
   Design notes
   - Instances are callable via a Proxy that forwards to an internal log() function.
   - DEBUG env supports comma/space-separated patterns, wildcards '*', and optional negation with leading '-'.
-  - Printing goes to stderr with a small, predictable format. Objects are JSON-stringified; Errors are summarized.
+  - Printing goes to stdout in Node (fast stream write) and console.log elsewhere. Objects are JSON-stringified; Errors are summarized.
 */
 
 // Environment/IO guards
-const isNode = typeof process !== "undefined" && !!(process as any)?.stderr;
+// We treat "Node" as: a runtime with `process` and writable `process.stdout`.
+// Ratatouille does *not* model an "error stream"—topics can be named "error" but
+// output is just a single fire-hose stream.
+const isNode =
+  typeof process !== "undefined" &&
+  !!(process as any)?.stdout &&
+  typeof (process as any).stdout.write === "function";
 
 // RATATOUILLE quick flags / JSON config
 interface K2LogConfig {
@@ -64,7 +70,9 @@ const RT_CFG: K2LogConfig = { ...DEFAULT_CFG, ...readRatatouilleEnv() };
 const colorsEnabled =
   RT_CFG.color === "off" ? false :
   RT_CFG.color === "on" ? true :
-  (isNode && !!(process.stderr as any)?.isTTY && !process.env.NO_COLOR && process.env.FORCE_COLOR !== "0");
+  // Use TTY detection on stdout (our single output stream). If the output is not a TTY
+  // (e.g., redirected to a file/pipe), avoid emitting ANSI color codes.
+  (isNode && !!(process.stdout as any)?.isTTY && !process.env.NO_COLOR && process.env.FORCE_COLOR !== "0");
 
 function readEnvFilters(): string {
   const vars = RT_CFG.debugVars ?? ["DEBUG"]; // allow multiples via RATATOUILLE JSON
@@ -77,7 +85,9 @@ function currentFilterString(): string | undefined {
   return isNode ? readEnvFilters() : undefined;
 }
 
-let DEBUG_CFG = parseDebugEnv(currentFilterString());
+// Compiled allow/deny patterns for the *emission* filter (topics that exist).
+// Note: DEBUG is treated as a compatibility input for local dev printing; the core filter is RATATOUILLE.filter.
+let FILTER_CFG = parseDebugEnv(currentFilterString());
 
 function computePrintEnabled(): boolean {
   // Explicit override wins
@@ -97,7 +107,7 @@ let PRINT_ENABLED = computePrintEnabled();
 export function setDebug(value: string | undefined) {
   // Treat setDebug as the programmatic way to set the primary filter.
   RT_CFG.filter = value;
-  DEBUG_CFG = parseDebugEnv(currentFilterString());
+  FILTER_CFG = parseDebugEnv(currentFilterString());
   enabledCache.clear();
   PRINT_ENABLED = computePrintEnabled();
 }
@@ -112,7 +122,12 @@ export function configureRatatouille(value: string | Partial<K2LogConfig> | unde
     if (s === "nocolor") next = { color: "off" };
     else if (s === "json") next = { format: "json" };
     else if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
-      try { next = (Array.isArray(JSON.parse(s)) ? JSON.parse(s)[0] : JSON.parse(s)) as Partial<K2LogConfig>; } catch { /* ignore */ }
+      try {
+        const parsed = JSON.parse(s);
+        next = (Array.isArray(parsed) ? parsed[0] : parsed) as Partial<K2LogConfig>;
+      } catch {
+        /* ignore */
+      }
     }
   } else if (typeof value === "object") {
     next = value;
@@ -125,7 +140,7 @@ export function configureRatatouille(value: string | Partial<K2LogConfig> | unde
   if (typeof next.print === "boolean") (RT_CFG as any).print = next.print;
   if (next.extra && typeof next.extra === "object") (RT_CFG as any).extra = next.extra;
   // recompute
-  DEBUG_CFG = parseDebugEnv(currentFilterString());
+  FILTER_CFG = parseDebugEnv(currentFilterString());
   enabledCache.clear();
   PRINT_ENABLED = computePrintEnabled();
 }
@@ -166,10 +181,10 @@ function isEnabledFor(topic: string): boolean {
   const cached = enabledCache.get(topic);
   if (cached !== undefined) return cached;
 
-  const { allow, deny } = DEBUG_CFG;
+  const { allow, deny } = FILTER_CFG;
   if (allow.length === 0 && deny.length === 0) {
     enabledCache.set(topic, false);
-    return false; // DEBUG unset => disabled
+    return false; // filter unset => disabled
   }
   const impliedAllowAll = allow.length === 0 && deny.length > 0; // pure deny list means allow everything except…
   const allowed = impliedAllowAll || allow.some((rx) => rx.test(topic));
@@ -210,15 +225,24 @@ function fmtPart(arg: unknown): string {
 
 function writeLine(s: string, force = false) {
   if (!PRINT_ENABLED && !force) return;
+
   if (isNode) {
+    // Node hot-path: write the already-formatted line directly to stdout.
+    // This is typically lower overhead than `console.log` because it avoids additional
+    // formatting/inspection work and gives us predictable newline behavior.
+    // We intentionally do *not* write to stderr: Ratatouille is a single-stream fire hose,
+    // and stderr vs stdout is not used to encode "error" semantics.
     try {
-      process.stderr.write(s + "\n");
+      process.stdout.write(s + "\n");
     } catch {
       // ignore write errors in dev logging
     }
   } else {
+    // Workers/Browser: there is no Node stream API, so use console.
+    // IMPORTANT: use `console.log` (not `console.error`) so Wrangler/devtools don't
+    // classify every log line as an ERROR.
     // eslint-disable-next-line no-console
-    console.error(s);
+    console.log(s);
   }
 }
 
@@ -344,8 +368,12 @@ export interface TopicCallable {
   /** Whether local DEBUG printing is enabled for this topic */
   readonly enabled: boolean;
   /** Attach a non-blocking handler for JSON envelopes; returns the same callable for chaining.
-   * If any handler is attached with alsoPrint=false (default), printing is suppressed and only handlers run.
-   * If at least one handler is attached with alsoPrint=true, printing happens as well as handlers.
+   * Handlers represent the "sink" side of Ratatouille (the core fire-hose). They run whenever the topic
+   * is enabled by filters, regardless of whether local console printing is enabled.
+   *
+   * Printing is a convenience "PrintSink" for developers. If any handler is attached with alsoPrint=false
+   * (default), printing is suppressed and only handlers run. If at least one handler is attached with
+   * alsoPrint=true, printing happens as well as handlers (subject to the print gate).
    */
   extend(handler: (envelope: LogEnvelope) => void, alsoPrint?: boolean): TopicCallable;
 }
@@ -377,38 +405,59 @@ function createCallableTopic(name: string, config?: TopicOptions | TopicMeta): T
   let self: TopicCallable; // will assign after proxy creation
 
   const fn = ((...args: unknown[]) => {
-    if (!isEnabledFor(baseName)) return; // no-op when DEBUG doesn’t match
+    // Emission gate: topic enabled by filters. This governs the "fire-hose" (handlers/sinks).
+    if (!isEnabledFor(baseName)) return;
+
     const n = ++seq;
-    // Determine if we would print at all (global gate and per-topic override)
-    const force = perTopicPrint === true;
-    const suppress = perTopicPrint === false;
-    const wouldPrint = suppress ? false : (force ? true : PRINT_ENABLED);
-    if (!wouldPrint) return; // if we wouldn't print, we also don't call extensions
     const ts = nowIso();
     const envelope: LogEnvelope = { ts, seq: n, topic: baseName, meta: opts.meta ?? null, args, env: opts.env };
-    // Fire-and-forget extension handlers (only when we would print)
+
+    // Fire-and-forget extension handlers (the core sink path). These run whenever enabled,
+    // independent of local printing.
     if (extensions.length) {
       const call = () => {
         for (const h of extensions) {
-          try { h.fn(envelope); } catch { /* ignore */ }
+          try {
+            h.fn(envelope);
+          } catch {
+            /* ignore */
+          }
         }
       };
-      try { setTimeout(call, 0); } catch { try { queueMicrotask(call); } catch { /* ignore */ } }
-    }
-    // Decide whether to perform local printing too
-    const shouldAlsoPrint = extensions.length === 0 || extensions.some((h) => h.alsoPrint);
-    if (shouldAlsoPrint) {
-      if ((RT_CFG.format ?? "text") === "json") {
-        writeJsonLine(n, baseName, opts.meta, args, opts.env, force);
-      } else {
-        const head = `[${ts} #${padSeq(n)}] ${colorizeTopic(baseName, explicitColor)}`;
-        const pieces = args.map((a) => fmtPart(a));
-        const metaStr = opts.meta ? ` ${fmtPart(opts.meta)}` : "";
-        const envStr = typeof opts.env !== "undefined" ? ` ${fmtPart(opts.env)}` : "";
-        const line = `${head}${metaStr}${envStr} — ${pieces.join(" ")}`;
-        writeLine(line, force);
+      try {
+        setTimeout(call, 0);
+      } catch {
+        try {
+          queueMicrotask(call);
+        } catch {
+          /* ignore */
+        }
       }
     }
+
+    // Print is a convenience for developers. It is controlled by a global gate and an optional
+    // per-topic override, and can be suppressed when handlers are attached (unless any handler opts
+    // in to alsoPrint).
+    const forcePrint = perTopicPrint === true;
+    const suppressPrint = perTopicPrint === false;
+    const printGate = suppressPrint ? false : (forcePrint ? true : PRINT_ENABLED);
+
+    const shouldAlsoPrint = extensions.length === 0 || extensions.some((h) => h.alsoPrint);
+    const shouldPrint = printGate && shouldAlsoPrint;
+
+    if (!shouldPrint) return;
+
+    if ((RT_CFG.format ?? "text") === "json") {
+      writeJsonLine(n, baseName, opts.meta, args, opts.env, forcePrint);
+      return;
+    }
+
+    const head = `[${ts} #${padSeq(n)}] ${colorizeTopic(baseName, explicitColor)}`;
+    const pieces = args.map((a) => fmtPart(a));
+    const metaStr = opts.meta ? ` ${fmtPart(opts.meta)}` : "";
+    const envStr = typeof opts.env !== "undefined" ? ` ${fmtPart(opts.env)}` : "";
+    const line = `${head}${metaStr}${envStr} — ${pieces.join(" ")}`;
+    writeLine(line, forcePrint);
   }) as TopicCallable;
 
   self = new Proxy(fn, {
@@ -430,9 +479,13 @@ function createCallableTopic(name: string, config?: TopicOptions | TopicMeta): T
   return self;
 }
 
-export const Topic: TopicConstructor = function (this: unknown, name: string, meta?: TopicMeta): TopicCallable {
+export const Topic: TopicConstructor = function (
+  this: unknown,
+  name: string,
+  config?: TopicOptions | TopicMeta,
+): TopicCallable {
   // Note: second arg may be legacy meta or a config object
-  return createCallableTopic(name, meta as any);
+  return createCallableTopic(name, config);
 } as unknown as TopicConstructor;
 
 export default Topic;
