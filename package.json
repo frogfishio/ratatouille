@@ -1,6 +1,6 @@
 {
   "name": "@frogfish/ratatouille",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Best-effort telemetry firehose with NDJSON Relay sinks (Node + Workers) and optional local printing.",
   "license": "GPL-3.0-only",
   "publishConfig": {
@@ -34,12 +34,39 @@
       "types": "./dist/relay.d.ts",
       "import": "./dist/relay.js",
       "require": "./dist/relay.cjs"
+    },
+    "./transports/ringtail": {
+      "browser": {
+        "types": "./dist/transports/ringtail.worker.d.ts",
+        "import": "./dist/transports/ringtail.worker.js"
+      },
+      "types": "./dist/transports/ringtail.d.ts",
+      "import": "./dist/transports/ringtail.js",
+      "require": "./dist/transports/ringtail.cjs"
+    },
+    "./presets/nomad": {
+      "types": "./dist/presets/nomad.d.ts",
+      "import": "./dist/presets/nomad.js",
+      "require": "./dist/presets/nomad.cjs"
+    },
+    "./presets/lambda": {
+      "types": "./dist/presets/lambda.d.ts",
+      "import": "./dist/presets/lambda.js",
+      "require": "./dist/presets/lambda.cjs"
+    },
+    "./presets/workers": {
+      "browser": {
+        "types": "./dist/presets/workers.d.ts",
+        "import": "./dist/presets/workers.js"
+      },
+      "types": "./dist/presets/workers.d.ts",
+      "import": "./dist/presets/workers.js"
     }
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "npm run clean && tsup",
-    "dev": "tsup --watch",
+    "build": "npm run clean && tsup src/index.node.ts src/index.browser.ts src/relay.ts src/relay.worker.ts src/transports/ringtail.ts src/transports/ringtail.worker.ts src/presets/nomad.ts src/presets/lambda.ts src/presets/workers.ts",
+    "dev": "tsup src/index.node.ts src/index.browser.ts src/relay.ts src/relay.worker.ts src/transports/ringtail.ts src/transports/ringtail.worker.ts src/presets/nomad.ts src/presets/lambda.ts src/presets/workers.ts --watch",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

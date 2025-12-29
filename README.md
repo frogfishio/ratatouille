@@ -113,6 +113,8 @@ pnpm add @frogfish/ratatouille
 
 > Working locally? Import from source: `import Topic, { setDebug } from "./src/topic"`.
 
+If you want a diskless local collector + tailer, pair this with **Ringtail** (NDJSON sink + `tail`).
+
 ---
 
 ## Quick start
@@ -146,6 +148,166 @@ Output (text mode):
 ```
 [2025-09-05T01:23:45.678Z #000001] debug — hello world {"user":"alice"} {"requestId":123} extra arg
 [2025-09-05T01:23:45.790Z #000002] debug — …
+```
+
+---
+
+## Ship logs to Ringtail (recommended local dev collector)
+
+Ratatouille is the **producer** + optional **relay**. To actually *watch* a firehose, you need a sink.
+
+**Ringtail** is the companion sink/tailer: an **in-memory, diskless** NDJSON collector you can run locally (or in Nomad) and `tail` like a live feed.
+
+### What gets sent over the wire
+
+By default, `Relay.send(payload)` emits **one NDJSON line per call**. If the payload is already an *envelope* (a plain object with a `topic`), Relay will pass it through and ensure:
+
+- `ts` exists (adds `Date.now()` if missing)
+- `src` exists (injects/merges your configured identity)
+
+If the payload is *not* an envelope, Relay wraps it into a minimal envelope:
+
+```json
+{"ts":1730000000000,"topic":"raw","args":["hello"],"src":{"app":"edge-auth","where":"cf-worker","instance":"prod:abc"}}
+```
+
+This keeps the producer API flexible ("log anything") while keeping the transport format predictable.
+
+### Ringtail endpoint normalization
+
+If you configure Relay with an HTTP(S) host-only endpoint (no path, or `/`), it will default to:
+- `http(s)://host:port/sink`
+
+So these are equivalent:
+- `endpoint: "http://127.0.0.1:8080"`
+- `endpoint: "http://127.0.0.1:8080/sink"`
+
+### Environment variables (Ringtail + identity)
+
+These are the variables you'll use most often when shipping to Ringtail:
+
+#### Collector
+- `RINGTAIL_URL` — base URL for Ringtail (path optional). Examples:
+  - `http://127.0.0.1:8080`
+  - `http://127.0.0.1:8080/sink`
+- `RINGTAIL_TOKEN` — optional Bearer token (sent as `Authorization: Bearer …`)
+
+#### Source identity (injected into every envelope as src)
+- `RATATOUILLE_APP` — service/app name (e.g. payments, edge-auth)
+- `RATATOUILLE_WHERE` — runtime label (e.g. nomad, node, cf-worker)
+- `RATATOUILLE_INSTANCE` — instance label (alloc id / isolate id / hostname-ish)
+- `RATATOUILLE_DEFAULT_TOPIC` — used when you call Relay.send("a string") (defaults to raw)
+
+> Tip: identity is what makes server-side filtering practical: `src.app`, `src.where`, `src.instance`.
+
+Set `RINGTAIL_URL` to enable shipping; if unset, presets typically only print locally unless you wire a transport explicitly.
+
+### Local dev: one-liner mental model
+1. run Ringtail (sink)
+2. run your services with Ratatouille → Relay
+3. tail Ringtail
+
+#### Example
+
+```bash
+# terminal A: start sink
+ringtail sink --listen 127.0.0.1:8080
+
+# terminal B: watch the stream
+ringtail tail http://127.0.0.1:8080
+
+# terminal C: run your app with env pointing at the sink
+export RINGTAIL_URL=http://127.0.0.1:8080
+export RATATOUILLE_APP=api
+export RATATOUILLE_WHERE=dev
+node app.js
+```
+
+
+---
+
+## Presets (recommended)
+
+Presets give you a tiny, reusable log factory that:
+- computes a sensible src identity for the environment
+- optionally wires topics to Ringtail automatically
+- keeps the hot path non-blocking (drops are OK)
+
+### Nomad / Node preset
+
+```ts
+import { createNomadFactory } from "@frogfish/ratatouille/presets/nomad";
+
+// create once (singleton)
+export const log = createNomadFactory({
+  alsoPrint: true, // print locally while forwarding
+});
+
+// use anywhere
+const api = log.topic("api", { svc: "api" });
+api("hello", { user: "alice" });
+```
+
+Enable shipping by setting `RINGTAIL_URL` (and optionally `RINGTAIL_TOKEN`).
+The Nomad preset derives src from Nomad env vars when present (job/group/task/alloc), but you can override with `RATATOUILLE_*`.
+
+Optional eager connect:
+
+```ts
+await log.initLogging();
+```
+
+### Workers preset (Cloudflare Workers / browsers)
+
+```ts
+import { createWorkersFactory } from "@frogfish/ratatouille/presets/workers";
+
+export default {
+  async fetch(req: Request, env: any, ctx: ExecutionContext) {
+    const log = createWorkersFactory({
+      env,
+      app: "edge-auth",
+      where: "cf-worker",
+      alsoPrint: true,
+    });
+
+    log.topic("api")("hit", { url: req.url, method: req.method });
+
+    // best-effort: ensures at least one connect/flush path runs before isolate goes idle
+    ctx.waitUntil(log.initLogging());
+
+    return new Response("ok");
+  },
+};
+```
+
+Notes:
+- Workers don't guarantee timers (setInterval) will fire before an isolate is suspended.
+- If you care about getting some logs out, call `ctx.waitUntil(relay.flushNow())` in your Worker, or `ctx.waitUntil(log.initLogging())` if you're using the preset.
+
+### Transport-only (no preset)
+
+If you want full control, wire a transport directly:
+
+```ts
+import Topic from "@frogfish/ratatouille";
+import { createRingtailTransport } from "@frogfish/ratatouille/transports/ringtail";
+
+const rt = createRingtailTransport({
+  url: process.env.RINGTAIL_URL || "http://127.0.0.1:8080",
+  token: process.env.RINGTAIL_TOKEN,
+  includeEnv: true,
+  src: {
+    app: process.env.RATATOUILLE_APP || "api",
+    where: process.env.RATATOUILLE_WHERE || "node",
+    instance: process.env.RATATOUILLE_INSTANCE || "local",
+  },
+});
+
+await rt.connect();
+
+const log = Topic("api").extend((e) => rt.send(e), true);
+log("hello");
 ```
 
 ---
@@ -268,7 +430,7 @@ RATATOUILLE='{"filter":"api*,auth*,-auth:noise","color":"off"}' node app.js
 
 # Back-compat: merge DEBUG + XYZ from env if no RATATOUILLE.filter is set
 RATATOUILLE='{"debugVars":["DEBUG","XYZ"]}' XYZ=auth* DEBUG=-db* node app.js
-
+```
 ### Printing behavior
 
 - If `RATATOUILLE.print` is set, it takes precedence.
@@ -313,7 +475,9 @@ export default {
 }
 ```
 
-# Force JSON logs regardless of TTY
+Force JSON logs regardless of TTY:
+
+```bash
 RATATOUILLE='{"format":"json"}' DEBUG=api* node app.js
 ```
 
@@ -355,6 +519,7 @@ debug.extend((e) => {
   // Forward to legacy/bespoke loggers without blocking the request path
   console.log(`[legacy] ${e.topic}#${e.seq} ${JSON.stringify(e)}`);
 });
+```
 
 ### Extensions (bridge to legacy loggers)
 
@@ -413,7 +578,6 @@ const warn = Topic('app', { meta: { level: 'warn' }, env: { region: 'iad' } })
   });
 
 warn('cpu high', { usage: 0.92 });
-```
 ```
 
 ### Alternative imports
@@ -497,6 +661,8 @@ This matches Ringtail’s ingestion endpoint naming.
 
 In a fire-hose system, “what” happened is only half the story — you also need **where it came from**.
 Relay can inject a small, static **source identity** into every emitted envelope as `src`.
+
+Presets (Nomad/Workers) compute `src` for you automatically; you can still override it with `RATATOUILLE_APP`, `RATATOUILLE_WHERE`, and `RATATOUILLE_INSTANCE`.
 
 You can set it in code:
 

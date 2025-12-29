@@ -82,9 +82,14 @@ export class Relay {
   }
 
   private normalizeEndpoint(endpoint: string): string {
-    if (!(endpoint.startsWith("http://") || endpoint.startsWith("https://"))) return endpoint;
+    const s = (endpoint || "").trim();
+    if (!s) return endpoint;
+
+    // Allow host:port as shorthand; Workers only support http(s).
+    const withScheme = s.startsWith("http://") || s.startsWith("https://") ? s : `http://${s}`;
+
     try {
-      const u = new URL(endpoint);
+      const u = new URL(withScheme);
       if (!u.pathname || u.pathname === "/") u.pathname = "/sink";
       return u.toString();
     } catch {
