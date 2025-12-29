@@ -23,6 +23,16 @@ export interface RelayConfig {
   // Optional encoder override. If provided, `send()` will pass the payload through this encoder
   // and enqueue the returned string as a single NDJSON line (a trailing `\n` is added if missing).
   encode?: (payload: unknown) => string;
+
+  // Optional static source identity injected into every envelope.
+  // Example: { app: "payments", where: "node", instance: "prod-eu1" }
+  // If omitted, defaults can be sourced from env:
+  //   RATATOUILLE_APP, RATATOUILLE_WHERE, RATATOUILLE_INSTANCE
+  source?: Record<string, unknown>;
+
+  // Default topic used when payload is not already an envelope with a `topic`.
+  // Can be overridden via env RATATOUILLE_DEFAULT_TOPIC.
+  defaultTopic?: string;          // default "raw"
 }
 
 const DEFAULTS = {
@@ -33,10 +43,24 @@ const DEFAULTS = {
   dropPolicy: "drop_oldest" as const,
   keepAlive: true,
   sampleRate: 1,
+  defaultTopic: "raw",
 };
 
 export class Relay {
-  private config: Omit<Required<RelayConfig>, "encode"> & { encode?: (payload: unknown) => string };
+  private config: {
+    endpoint: string;
+    batchMs: number;
+    batchBytes: number;
+    maxQueueBytes: number;
+    maxQueue: number;
+    dropPolicy: "drop_oldest" | "drop_newest";
+    headers: Record<string, string>;
+    keepAlive: boolean;
+    sampleRate: number;
+    encode?: (payload: unknown) => string;
+    source: Record<string, unknown>;
+    defaultTopic: string;
+  };
   private socket?: net.Socket;
   private httpAgent?: http.Agent | https.Agent;
   private closed = false;
@@ -53,13 +77,65 @@ export class Relay {
   private lastError?: string;
   private lastFlushMs?: number;
 
+  private normalizeEndpoint(endpoint: string): string {
+    if (!(endpoint.startsWith("http://") || endpoint.startsWith("https://"))) return endpoint;
+    try {
+      const u = new URL(endpoint);
+      if (!u.pathname || u.pathname === "/") u.pathname = "/sink";
+      return u.toString();
+    } catch {
+      return endpoint;
+    }
+  }
+
+  private envSource(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const app = process.env.RATATOUILLE_APP;
+    const where = process.env.RATATOUILLE_WHERE;
+    const instance = process.env.RATATOUILLE_INSTANCE;
+    if (app) out.app = app;
+    if (where) out.where = where;
+    if (instance) out.instance = instance;
+    return out;
+  }
+
+  /** Default encoder: wrap payload into an envelope and inject `source`. */
+  private encodeDefault(payload: unknown): string {
+    const src = this.config.source && Object.keys(this.config.source).length ? this.config.source : undefined;
+
+    const isPlainObject = (x: any) =>
+      x && typeof x === "object" && !Array.isArray(x) && Object.getPrototypeOf(x) === Object.prototype;
+
+    // If caller already sent an envelope with `topic`, keep it, but ensure ts/src exist.
+    if (isPlainObject(payload) && typeof (payload as any).topic === "string") {
+      const p = payload as any;
+      const out: any = { ...p };
+      if (out.ts == null) out.ts = Date.now();
+      if (src) out.src = out.src && isPlainObject(out.src) ? { ...src, ...out.src } : src;
+      return JSON.stringify(out);
+    }
+
+    // Otherwise wrap into a minimal envelope.
+    const env: any = {
+      ts: Date.now(),
+      topic: this.config.defaultTopic || "raw",
+      args: [payload],
+    };
+    if (src) env.src = src;
+    return JSON.stringify(env);
+  }
+
   // prevent overlapping flushes (timer + explicit flushNow)
   private flushing = false;
 
   constructor(endpointOrConfig: string | RelayConfig) {
     const cfg = typeof endpointOrConfig === "string" ? { endpoint: endpointOrConfig } : endpointOrConfig;
+
+    const envSource = this.envSource();
+    const envDefaultTopic = process.env.RATATOUILLE_DEFAULT_TOPIC;
+
     this.config = {
-      endpoint: cfg.endpoint,
+      endpoint: this.normalizeEndpoint(cfg.endpoint),
       batchMs: cfg.batchMs ?? DEFAULTS.batchMs,
       batchBytes: cfg.batchBytes ?? DEFAULTS.batchBytes,
       maxQueueBytes: cfg.maxQueueBytes ?? DEFAULTS.maxQueueBytes,
@@ -69,6 +145,10 @@ export class Relay {
       keepAlive: cfg.keepAlive ?? DEFAULTS.keepAlive,
       sampleRate: cfg.sampleRate ?? DEFAULTS.sampleRate,
       encode: cfg.encode,
+
+      // env provides defaults; explicit config wins
+      source: { ...envSource, ...(cfg.source ?? {}) },
+      defaultTopic: cfg.defaultTopic ?? envDefaultTopic ?? DEFAULTS.defaultTopic,
     };
   }
 
@@ -148,7 +228,7 @@ export class Relay {
       if (this.config.encode) {
         line = this.config.encode(payload);
       } else {
-        line = typeof payload === "string" ? payload : JSON.stringify(payload);
+        line = this.encodeDefault(payload);
       }
     } catch {
       this.dropped++;
@@ -177,7 +257,26 @@ export class Relay {
 
   /** Enqueue a pre-formatted NDJSON line (adds trailing \n if missing). */
   sendLine(line: string): void {
-    this.send(line);
+    if (this.closed) return;
+
+    let data = line;
+    if (!data.endsWith("\n")) data += "\n";
+
+    // oversize single line? drop it early
+    if (data.length > this.config.batchBytes) {
+      this.dropped++;
+      this.droppedBytes += data.length;
+      return;
+    }
+
+    if (!this.ensureCapacity(data.length)) {
+      this.dropped++;
+      this.droppedBytes += data.length;
+      return;
+    }
+
+    this.q.push(data);
+    this.queuedBytes += data.length;
   }
 
   /**

@@ -1,6 +1,9 @@
-# Ratatouille — idea, philosophy & ontology
+# Ratatouille — firehose logging for edge + microservices
 
-**Designed for a fast, fire‑hose blast of logs — the flood of everything.**
+
+**A tiny logger + fire‑hose relay for shipping “everything logs” — fast, diskless, and filterable at the edge.**
+
+Think of it as `DEBUG` meets a market data feed: producers emit freely; ops curates later.
 
 Ratatouille treats logs like a live market feed, not a database. Producers **speak freely** and emit
 *anything* (strings, blobs, JSON, haiku). There’s no sacred schema or level system to satisfy.
@@ -451,6 +454,7 @@ Use `Relay` to batch and forward logs to a collector. It supports two runtimes:
 
 ### Config
 
+
 ```ts
 type RelayConfig = {
   endpoint: string;               // "tcp://host:port" (Node) or "https://…" (Workers)
@@ -466,27 +470,117 @@ type RelayConfig = {
   keepAlive?: boolean;            // Node HTTP(S) keep-alive agent (default true). Ignored in Workers.
   sampleRate?: number;            // 0..1 probability to keep a line (default 1)
 
-  // Optional encoder override for `send(payload)`
+  // Transport identity injected into every envelope (as `src`).
+  // Example: { app: "payments", where: "node", instance: "prod-eu1" }
+  // Defaults can come from env (below); explicit config wins.
+  source?: Record<string, unknown>;
+
+  // Default topic used when payload is not already an envelope with a `topic`.
+  // Can be overridden via env.
+  defaultTopic?: string;          // default "raw"
+
+  // Optional encoder override for `send(payload)`.
+  // If you provide this, you control the wire format.
   encode?: (payload: unknown) => string;
 }
 ```
+
+### Transport defaults (endpoint normalization)
+
+Relay POSTs to whatever `endpoint` you give it. For convenience, if you pass a **host-only** HTTP(S) URL (no path or just `/`), Relay will default the path to:
+
+- `http(s)://host:port/sink`
+
+This matches Ringtail’s ingestion endpoint naming.
+
+### Transport identity (`src`)
+
+In a fire-hose system, “what” happened is only half the story — you also need **where it came from**.
+Relay can inject a small, static **source identity** into every emitted envelope as `src`.
+
+You can set it in code:
+
+```ts
+const relay = new Relay({
+  endpoint: "http://127.0.0.1:8080",
+  headers: { Authorization: `Bearer ${process.env.RINGTAIL_TOKEN}` },
+  source: {
+    app: "edge-auth",          // app/service identifier
+    where: "cf-worker",        // runtime / environment label
+    instance: "prod-eu1:abc",  // deployment slice / isolate id / hostname-ish
+  },
+});
+```
+
+Or set defaults via environment variables (useful in Nomad/K8s/etc.):
+
+- `RATATOUILLE_APP`
+- `RATATOUILLE_WHERE`
+- `RATATOUILLE_INSTANCE`
+- `RATATOUILLE_DEFAULT_TOPIC`
+
+Explicit config wins over env. (Relay merges `{...env, ...config.source}`.)
+
+### Wire envelope (default)
+
+By default, `relay.send(payload)` emits **one NDJSON line** containing a minimal envelope.
+
+If `payload` is already a plain object with a `topic`, Relay treats it as an envelope and will ensure:
+
+- `ts` exists (adds `Date.now()` if missing)
+- `src` exists (injects/merges configured `source`)
+
+Otherwise Relay wraps the payload:
+
+```json
+{"ts":1730000000000,"topic":"raw","args":["haiku"],"src":{"app":"edge-auth","where":"cf-worker","instance":"prod-eu1:abc"}}
+```
+
+This keeps Ratatouille’s **“emit anything”** philosophy while keeping the network transport predictable.
+
+#### Why envelopes?
+
+- Server-side filters (e.g. Ringtail admission filters) can match `topic` reliably.
+- You can filter by `src.app`, `src.where`, `src.instance` without parsing arbitrary payloads.
+- The wire format is stable even when producers log strings/blobs.
+
+### “Bullshit mode” (raw lines/chunks)
+
+Sometimes you just want to ship bytes with zero ceremony.
+
+- `sendLine(line)` enqueues a **pre-formatted NDJSON line** exactly as you give it (Relay will only add a trailing `\n` if missing).
+- `sendChunk(chunk)` enqueues an arbitrary NDJSON **chunk** (may contain many lines). Relay does **no parsing/validation**.
+
+Use this mode when you don’t want envelopes — but note:
+
+- Server-side topic filtering won’t work unless your raw lines include a `topic` field.
+- If you want filtering + identity, prefer `send()` with envelopes.
 
 ### Node example (HTTP keep‑alive)
 
 ```ts
 import { Relay } from "@frogfish/ratatouille";
+import crypto from "crypto";
 
+// Host-only endpoint is fine; Relay defaults to /sink
 const relay = new Relay({
-  endpoint: "https://logs.example.com/ingest",
+  endpoint: process.env.RINGTAIL_URL || "http://127.0.0.1:8080",
   keepAlive: true,               // enables Node http(s).Agent keep-alive
   batchMs: 100,                  // send every ~100ms
-  headers: { Authorization: `Bearer ${process.env.LOG_TOKEN}` },
+  headers: process.env.RINGTAIL_TOKEN
+    ? { Authorization: `Bearer ${process.env.RINGTAIL_TOKEN}` }
+    : {},
+  source: {
+    app: process.env.RATATOUILLE_APP || "api",
+    where: process.env.RATATOUILLE_WHERE || "node",
+    instance: process.env.RATATOUILLE_INSTANCE || `local:${crypto.randomUUID()}`,
+  },
 });
 
 await relay.connect();
 
 // emit logs
-relay.send({ level: "info", msg: "service started" });
+relay.send({ topic: "api", msg: "service started" });
 
 // flush at checkpoints
 await relay.flushNow();
@@ -515,16 +609,26 @@ relay.send({ level: "warn", msg: "hot path" });
 // worker.ts
 import Relay from "@frogfish/ratatouille/relay"; // Worker variant (fetch-based)
 
-let relay: Relay | undefined; // lazily initialize with env-bound headers
+let relay: any; // lazily initialize with env-bound headers
 
 export default {
   async fetch(req: Request, env: any, ctx: ExecutionContext) {
     if (!relay) {
+      const isolateId = crypto.randomUUID();
+
       relay = new Relay({
-        endpoint: "https://logs.example.com/ingest",
+        // Host-only endpoint is fine; Relay defaults to /sink
+        endpoint: env.RINGTAIL_URL || "http://127.0.0.1:8080",
         batchMs: 100,
         sampleRate: 1, // set <1 to reduce volume (e.g., 0.1)
-        headers: env.LOG_TOKEN ? { Authorization: `Bearer ${env.LOG_TOKEN}` } : undefined,
+        headers: env.RINGTAIL_TOKEN
+          ? { Authorization: `Bearer ${env.RINGTAIL_TOKEN}` }
+          : undefined,
+        source: {
+          app: env.RATATOUILLE_APP || "edge-auth",
+          where: "cf-worker",
+          instance: `${env.ENVIRONMENT || "dev"}:${isolateId}`,
+        },
       });
       await relay.connect();
     }
@@ -534,8 +638,6 @@ export default {
 
     // ensure at least one batch is pushed even if the isolate goes idle soon
     ctx.waitUntil(relay.flushNow());
-
-
 
     return new Response("ok");
   }
@@ -767,3 +869,5 @@ No suffix → uncolored topic. `#random` → assign a stable 256‑color from a 
 
 ## License
 GPL-3.0-only
+
+**Commercial** license for proprietary redistribution/hosted offerings. Please contact info@frogfish.io

@@ -19,6 +19,13 @@ export interface RelayConfig {
   // Optional encoder override. If provided, `send()` will pass the payload through this encoder
   // and enqueue the returned string as a single NDJSON line (a trailing `\n` is added if missing).
   encode?: (payload: unknown) => string;
+
+  // Optional static source identity injected into every envelope.
+  // Example: { app: "payments", where: "cf-worker", instance: "prod-eu1" }
+  source?: Record<string, unknown>;
+
+  // Default topic used when payload is not already an envelope with a `topic`.
+  defaultTopic?: string;          // default "raw"
 }
 
 const DEFAULTS = {
@@ -29,6 +36,7 @@ const DEFAULTS = {
   dropPolicy: "drop_oldest" as const,
   keepAlive: true,
   sampleRate: 1,
+  defaultTopic: "raw",
 };
 
 export class Relay {
@@ -47,13 +55,50 @@ export class Relay {
   private lastError?: string;
   private lastFlushMs?: number;
 
+  /** Default encoder: wrap payload into an envelope and inject `source`. */
+  private encodeDefault(payload: unknown): string {
+    const src = this.config.source && Object.keys(this.config.source).length ? this.config.source : undefined;
+
+    const isPlainObject = (x: any) =>
+      x && typeof x === "object" && !Array.isArray(x) && Object.getPrototypeOf(x) === Object.prototype;
+
+    // If caller already sent an envelope with `topic`, keep it, but ensure ts/src exist.
+    if (isPlainObject(payload) && typeof (payload as any).topic === "string") {
+      const p = payload as any;
+      const out: any = { ...p };
+      if (out.ts == null) out.ts = Date.now();
+      if (src) out.src = out.src && isPlainObject(out.src) ? { ...src, ...out.src } : src;
+      return JSON.stringify(out);
+    }
+
+    // Otherwise wrap into a minimal envelope.
+    const env: any = {
+      ts: Date.now(),
+      topic: this.config.defaultTopic || "raw",
+      args: [payload],
+    };
+    if (src) env.src = src;
+    return JSON.stringify(env);
+  }
+
+  private normalizeEndpoint(endpoint: string): string {
+    if (!(endpoint.startsWith("http://") || endpoint.startsWith("https://"))) return endpoint;
+    try {
+      const u = new URL(endpoint);
+      if (!u.pathname || u.pathname === "/") u.pathname = "/sink";
+      return u.toString();
+    } catch {
+      return endpoint;
+    }
+  }
+
   // prevent overlapping flushes (timer + explicit flushNow)
   private flushing = false;
 
   constructor(endpointOrConfig: string | RelayConfig) {
     const cfg = typeof endpointOrConfig === "string" ? { endpoint: endpointOrConfig } : endpointOrConfig;
     this.config = {
-      endpoint: cfg.endpoint,
+      endpoint: this.normalizeEndpoint(cfg.endpoint),
       batchMs: cfg.batchMs ?? DEFAULTS.batchMs,
       batchBytes: cfg.batchBytes ?? DEFAULTS.batchBytes,
       maxQueueBytes: cfg.maxQueueBytes ?? DEFAULTS.maxQueueBytes,
@@ -63,6 +108,8 @@ export class Relay {
       keepAlive: cfg.keepAlive ?? DEFAULTS.keepAlive,
       sampleRate: cfg.sampleRate ?? DEFAULTS.sampleRate,
       encode: cfg.encode,
+      source: cfg.source ?? {},
+      defaultTopic: cfg.defaultTopic ?? DEFAULTS.defaultTopic,
     } as Required<RelayConfig>;
   }
 
@@ -129,7 +176,7 @@ export class Relay {
       if (this.config.encode) {
         line = this.config.encode(payload);
       } else {
-        line = typeof payload === "string" ? payload : JSON.stringify(payload);
+        line = this.encodeDefault(payload);
       }
     } catch {
       this.dropped++;

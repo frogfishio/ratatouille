@@ -1,6 +1,6 @@
 {
   "name": "@frogfish/ratatouille",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Best-effort telemetry firehose with NDJSON Relay sinks (Node + Workers) and optional local printing.",
   "license": "GPL-3.0-only",
   "publishConfig": {
