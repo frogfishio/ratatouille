@@ -13,7 +13,7 @@
     "README.md",
     "LICENSE"
   ],
-  "main": "./dist/index.node.cjs",
+  "main": "./dist/index.node.require.cjs",
   "module": "./dist/index.node.js",
   "types": "./dist/index.node.d.ts",
   "exports": {
@@ -24,7 +24,7 @@
       },
       "types": "./dist/index.node.d.ts",
       "import": "./dist/index.node.js",
-      "require": "./dist/index.node.cjs"
+      "require": "./dist/index.node.require.cjs"
     },
     "./relay": {
       "browser": {
@@ -33,7 +33,7 @@
       },
       "types": "./dist/relay.d.ts",
       "import": "./dist/relay.js",
-      "require": "./dist/relay.cjs"
+      "require": "./dist/relay.require.cjs"
     },
     "./transports/ringtail": {
       "browser": {
@@ -42,17 +42,17 @@
       },
       "types": "./dist/transports/ringtail.d.ts",
       "import": "./dist/transports/ringtail.js",
-      "require": "./dist/transports/ringtail.cjs"
+      "require": "./dist/transports/ringtail.require.cjs"
     },
     "./presets/nomad": {
       "types": "./dist/presets/nomad.d.ts",
       "import": "./dist/presets/nomad.js",
-      "require": "./dist/presets/nomad.cjs"
+      "require": "./dist/presets/nomad.require.cjs"
     },
     "./presets/lambda": {
       "types": "./dist/presets/lambda.d.ts",
       "import": "./dist/presets/lambda.js",
-      "require": "./dist/presets/lambda.cjs"
+      "require": "./dist/presets/lambda.require.cjs"
     },
     "./presets/workers": {
       "browser": {
@@ -65,8 +65,8 @@
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "npm run clean && tsup src/index.node.ts src/index.browser.ts src/relay.ts src/relay.worker.ts src/transports/ringtail.ts src/transports/ringtail.worker.ts src/presets/nomad.ts src/presets/lambda.ts src/presets/workers.ts",
-    "dev": "tsup src/index.node.ts src/index.browser.ts src/relay.ts src/relay.worker.ts src/transports/ringtail.ts src/transports/ringtail.worker.ts src/presets/nomad.ts src/presets/lambda.ts src/presets/workers.ts --watch",
+    "build": "npm run clean && tsup",
+    "dev": "tsup --watch",
     "contract:test": "node contract/run-all.mjs",
     "prepublishOnly": "npm run build"
   },
