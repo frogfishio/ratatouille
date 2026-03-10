@@ -89,6 +89,75 @@ Do **not** use logs to represent important state like:
 
 Those belong in an **audit/event** system with durability, idempotency, and query guarantees.
 
+## Cross-language contract
+
+Ratatouille is now intended to exist as a family of small runtime-native libraries, starting with:
+
+- Node.js
+- C
+- Rust
+
+The API shape does not need to match across languages. The shared contract is behavioral and wire-level.
+
+These invariants should hold across implementations:
+
+- **Best-effort telemetry**. Emission may drop; this is not an audit channel.
+- **Bounded state**. Implementations should keep memory bounded and expose drop behavior rather than block forever.
+- **Topic-first routing**. Topics are the primary filter/control surface.
+- **Per-topic sequence**. Each topic maintains its own monotonic local sequence counter.
+- **Text or NDJSON output**. Human mode and machine mode are both first-class.
+- **Stable envelope for sinks**. Transport-facing output should converge on the same envelope shape.
+- **Optional source identity**. Implementations may inject `src` such as `app`, `where`, and `instance`.
+- **No producer-side schema enforcement**. Producers can emit raw text or native-language payloads; transport format stays predictable.
+
+The canonical transport envelope is:
+
+```json
+{
+  "ts": "2026-03-11T12:34:56.789Z",
+  "seq": 42,
+  "topic": "api",
+  "src": {
+    "app": "edge-auth",
+    "where": "node",
+    "instance": "prod:abc"
+  },
+  "meta": null,
+  "args": ["hello world"],
+  "env": null
+}
+```
+
+Notes:
+
+- `meta` and `env` are optional.
+- `src` is optional but strongly recommended for distributed deployments.
+- Language-native producer APIs may narrow or widen payload types. For example, the initial C MVP emits a single string payload in `args`.
+
+### Shared contract corpus
+
+The repository now includes a shared cross-language contract corpus in `contract/cases.tsv`.
+
+The purpose of this corpus is to keep Node, C, and Rust aligned on the behavior that matters most:
+
+- filter semantics
+- per-topic sequencing
+- emitted vs filtered behavior
+
+Run the full suite with:
+
+```bash
+npm run contract:test
+```
+
+That command:
+
+- builds the Node package
+- builds the C runners
+- runs the Node contract runner
+- runs the C contract runner
+- runs the Rust contract runner
+
 # Ratatouille logger
 
 A tiny, flexible debug logger for Node and SSR that’s easy to read in dev and easy to pipe in prod.
@@ -114,6 +183,230 @@ pnpm add @frogfish/ratatouille
 > Working locally? Import from source: `import Topic, { setDebug } from "./src/topic"`.
 
 If you want a diskless local collector + tailer, pair this with **Ringtail** (NDJSON sink + `tail`).
+
+### C (MVP)
+
+The repository now includes a minimal-dependency C implementation in `c/`.
+
+Build the static library and example:
+
+```bash
+make -C c example
+./c/build/basic
+```
+
+Current C scope:
+
+- topic filtering with DEBUG-style wildcards
+- per-topic sequence counters
+- text and NDJSON output modes
+- stdout sink and callback sink API
+- plain HTTP POSIX sink for Ringtail-compatible NDJSON shipping
+- bounded HTTP relay with queueing and explicit batch flush
+- zero external dependencies
+
+### Rust (MVP)
+
+The repository now also includes a zero-dependency Rust crate in `rust/`.
+
+Build and run the example:
+
+```bash
+cargo run --manifest-path rust/Cargo.toml --example basic
+```
+
+Current Rust scope:
+
+- topic filtering with DEBUG-style wildcards
+- per-topic sequence counters
+- text and NDJSON output modes
+- stdout sink and custom sink trait support
+- plain HTTP sink and bounded explicit-flush relay
+- zero external dependencies beyond Rust std
+
+---
+
+## Rust quick start
+
+```rust
+use ratatouille::{Format, Logger, LoggerConfig, SourceIdentity};
+
+fn main() {
+  let mut config = LoggerConfig::default();
+  config.filter = Some("api*,-api:noise".into());
+  config.format = Format::Ndjson;
+  config.source = SourceIdentity {
+    app: Some("example".into()),
+    r#where: Some("rust".into()),
+    instance: Some("local".into()),
+  };
+
+  let mut log = Logger::new(config);
+  let _ = log.log("api", "hello from Rust");
+}
+```
+
+The initial Rust implementation mirrors the same behavioral contract as Node and C, but with Rust-native APIs and ownership rules.
+
+### Rust HTTP transport
+
+The Rust crate now includes a std-only plain HTTP sink and a bounded explicit-flush relay.
+
+Scope:
+
+- `http://` only
+- no TLS
+- no background thread
+- bounded in-memory queue on the relay path
+- explicit `flush_now()` for batch delivery
+
+Build and run the relay example:
+
+```bash
+cargo run --manifest-path rust/Cargo.toml --example http_relay
+```
+
+Example:
+
+```rust
+use ratatouille::{Format, HttpRelay, HttpRelayConfig, Logger, LoggerConfig};
+
+let relay = HttpRelay::new(HttpRelayConfig {
+  url: "http://127.0.0.1:8080/sink".into(),
+  batch_bytes: 4096,
+  max_queue_bytes: 65536,
+  max_queue: 128,
+  ..HttpRelayConfig::default()
+})?;
+
+let mut cfg = LoggerConfig::default();
+cfg.filter = Some("api*".into());
+cfg.format = Format::Ndjson;
+
+let mut log = Logger::with_sink(cfg, relay);
+let _ = log.log("api", "queued one");
+let _ = log.log("api", "queued two");
+let _ = log.sink_mut().flush_now()?;
+# Ok::<(), std::io::Error>(())
+```
+
+---
+
+## C quick start
+
+```c
+#include "ratatouille.h"
+
+int main(void) {
+  rat_config_t cfg = {0};
+  cfg.filter = "api*,-api:noise";
+  cfg.format = RAT_FORMAT_NDJSON;
+  cfg.source.app = "example";
+  cfg.source.where = "c";
+  cfg.source.instance = "local";
+
+  rat_logger_t *log = rat_logger_create(&cfg);
+  if (!log) return 1;
+
+  rat_log(log, "api", "hello from C");
+  rat_logf(log, "api", "user=%s req=%d", "alice", 42);
+
+  rat_logger_destroy(log);
+  return 0;
+}
+```
+
+The initial C implementation is intentionally small. It does not include the Relay transport yet; it gives you the hot-path producer, filter, sequence tracking, and stable line formatting first.
+
+### C HTTP sink
+
+The C library now includes a minimal plain-HTTP POSIX sink for local or trusted-network shipping.
+
+Scope:
+
+- `http://` only
+- no TLS
+- no background thread
+- one POST per emitted line
+- intended as the smallest transport bridge, not the final high-throughput path
+
+Example:
+
+```c
+rat_http_sink_config_t http_cfg = {0};
+http_cfg.url = "http://127.0.0.1:8080/sink";
+
+rat_http_sink_t *http_sink = rat_http_sink_create(&http_cfg);
+
+rat_config_t cfg = {0};
+cfg.filter = "api*";
+cfg.format = RAT_FORMAT_NDJSON;
+cfg.sink = rat_http_sink_callback;
+cfg.sink_userdata = http_sink;
+
+rat_logger_t *log = rat_logger_create(&cfg);
+rat_log(log, "api", "hello over HTTP");
+```
+
+Build the transport example with:
+
+```bash
+make -C c example
+./c/build/http_sink_example
+```
+
+If you need encrypted transport, batching, or a non-blocking network path in C, that should be the next transport layer rather than stretching this plain-HTTP sink beyond its intent.
+
+### C HTTP relay
+
+The C library now also includes a bounded in-memory HTTP relay.
+
+This is the C equivalent of the Node relay model at a smaller scope:
+
+- the logging hot path enqueues and returns
+- queue memory is bounded
+- drop behavior is explicit (`RAT_DROP_OLDEST` or `RAT_DROP_NEWEST`)
+- flush happens when you call `rat_http_relay_flush_now()`
+- one flush may POST multiple NDJSON lines in a single request
+
+This first version is still intentionally narrow:
+
+- `http://` only
+- no TLS
+- no hidden background thread
+- no timer loop inside the library
+
+Example:
+
+```c
+rat_http_relay_config_t relay_cfg = {0};
+relay_cfg.url = "http://127.0.0.1:8080/sink";
+relay_cfg.batch_bytes = 4096;
+relay_cfg.max_queue_bytes = 65536;
+relay_cfg.max_queue = 128;
+relay_cfg.drop_policy = RAT_DROP_OLDEST;
+
+rat_http_relay_t *relay = rat_http_relay_create(&relay_cfg);
+
+rat_config_t cfg = {0};
+cfg.filter = "api*";
+cfg.format = RAT_FORMAT_NDJSON;
+cfg.sink = rat_http_relay_callback;
+cfg.sink_userdata = relay;
+
+rat_logger_t *log = rat_logger_create(&cfg);
+rat_log(log, "api", "queued one");
+rat_log(log, "api", "queued two");
+
+rat_http_relay_flush_now(relay);
+```
+
+Build the relay example with:
+
+```bash
+make -C c example
+./c/build/http_relay_example
+```
 
 ---
 
@@ -256,6 +549,32 @@ Optional eager connect:
 ```ts
 await log.initLogging();
 ```
+
+### Lambda preset
+
+```ts
+import { createLambdaFactory } from "@frogfish/ratatouille/presets/lambda";
+
+export const log = createLambdaFactory({
+  alsoPrint: true,
+});
+
+export async function handler(event: any) {
+  log.topic("lambda", { svc: "edge-auth" })("invoked", { requestId: event?.requestContext?.requestId });
+  await log.initLogging();
+  return { ok: true };
+}
+```
+
+The Lambda preset derives `src` from AWS Lambda env vars when present, including:
+
+- `AWS_LAMBDA_FUNCTION_NAME`
+- `AWS_LAMBDA_FUNCTION_VERSION`
+- `AWS_REGION`
+- `AWS_LAMBDA_LOG_GROUP_NAME`
+- `AWS_LAMBDA_LOG_STREAM_NAME`
+
+You can still override identity with `RATATOUILLE_APP`, `RATATOUILLE_WHERE`, and `RATATOUILLE_INSTANCE`, or provide `src` directly.
 
 ### Workers preset (Cloudflare Workers / browsers)
 

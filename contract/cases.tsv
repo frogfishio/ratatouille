@@ -1,0 +1,10 @@
+# session	filter	topic	payload	expected_status	expected_seq
+nofilter	-	api	hello	filter	-
+allow_all	*	api	hello	emit	1
+allow_all	*	api	again	emit	2
+deny_only	-chat*	api	visible	emit	1
+deny_only	-chat*	chatty	hidden	filter	-
+allow_deny	api*,-api:noise	api	good	emit	1
+allow_deny	api*,-api:noise	api:noise	quiet	filter	-
+wildcard	service:*	service:db	up	emit	1
+wildcard	service:*	api	miss	filter	-

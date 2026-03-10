@@ -1,0 +1,12 @@
+[package]
+name = "ratatouille"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Best-effort telemetry firehose logger with bounded topic state"
+
+[lib]
+name = "ratatouille"
+path = "src/lib.rs"
+
+[dependencies]

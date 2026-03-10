@@ -67,6 +67,7 @@
     "clean": "rm -rf dist",
     "build": "npm run clean && tsup src/index.node.ts src/index.browser.ts src/relay.ts src/relay.worker.ts src/transports/ringtail.ts src/transports/ringtail.worker.ts src/presets/nomad.ts src/presets/lambda.ts src/presets/workers.ts",
     "dev": "tsup src/index.node.ts src/index.browser.ts src/relay.ts src/relay.worker.ts src/transports/ringtail.ts src/transports/ringtail.worker.ts src/presets/nomad.ts src/presets/lambda.ts src/presets/workers.ts --watch",
+    "contract:test": "node contract/run-all.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

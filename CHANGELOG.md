@@ -16,6 +16,9 @@
 
 ## 0.1.7
 
+- Added `@frogfish/ratatouille/presets/lambda` implementation for Node/AWS Lambda environments.
+- Lambda preset computes source identity from AWS Lambda env vars and can auto-wire Ringtail transport like the Nomad/Workers presets.
+
 - Topic.extend: added `extend(handler, alsoPrint?)` hook.
   - Default `alsoPrint=false`: extensions replace local printing (only handlers run).
   - If any attached extension uses `alsoPrint=true`: both print and invoke handlers.
