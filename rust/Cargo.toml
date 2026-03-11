@@ -1,8 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Alexander R. Croft
+# SPDX-License-Identifier: MIT
+
 [package]
 name = "ratatouille"
 version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-only"
+license = "MIT"
 description = "Best-effort telemetry firehose logger with bounded topic state"
 
 [lib]

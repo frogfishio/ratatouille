@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // topic.ts
 // Minimal, dev-focused Topic with DEBUG-style filtering and callable instances.
 // Usage:

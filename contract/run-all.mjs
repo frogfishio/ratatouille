@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 

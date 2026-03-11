@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 use ratatouille::{EmitResult, Format, Logger, LoggerConfig, Sink};
 use std::cell::RefCell;
 use std::collections::HashMap;

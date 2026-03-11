@@ -10,7 +10,7 @@
 #define RAT_RELAY_DEFAULT_MAX_QUEUE_BYTES 5242880U
 #define RAT_RELAY_DEFAULT_MAX_QUEUE 10000U
 
-static void rat_http_relay_drop_oldest(rat_http_relay_t *relay) {
+static void rat_tcp_relay_drop_oldest(rat_tcp_relay_t *relay) {
     if (!relay || relay->queue_len == 0) return;
 
     relay->dropped++;
@@ -24,7 +24,7 @@ static void rat_http_relay_drop_oldest(rat_http_relay_t *relay) {
     relay->queue_len--;
 }
 
-static int rat_http_relay_reserve(rat_http_relay_t *relay) {
+static int rat_tcp_relay_reserve(rat_tcp_relay_t *relay) {
     rat_queued_line_t *next;
     size_t next_cap;
 
@@ -42,14 +42,14 @@ static int rat_http_relay_reserve(rat_http_relay_t *relay) {
     return 0;
 }
 
-static int rat_http_relay_make_room(rat_http_relay_t *relay, size_t len) {
+static int rat_tcp_relay_make_room(rat_tcp_relay_t *relay, size_t len) {
     if (!relay) return -1;
 
     if (len > relay->batch_bytes) return -1;
 
     while ((relay->queue_len >= relay->max_queue || relay->queued_bytes + len > relay->max_queue_bytes) && relay->queue_len > 0) {
         if (relay->drop_policy == RAT_DROP_NEWEST) return -1;
-        rat_http_relay_drop_oldest(relay);
+        rat_tcp_relay_drop_oldest(relay);
     }
 
     if (relay->queue_len >= relay->max_queue) return -1;
@@ -57,23 +57,21 @@ static int rat_http_relay_make_room(rat_http_relay_t *relay, size_t len) {
     return 0;
 }
 
-rat_http_relay_t *rat_http_relay_create(const rat_http_relay_config_t *config) {
-    rat_http_relay_t *relay;
-    rat_http_sink_config_t sink_cfg;
+rat_tcp_relay_t *rat_tcp_relay_create(const rat_tcp_relay_config_t *config) {
+    rat_tcp_relay_t *relay;
+    rat_tcp_sink_config_t sink_cfg;
 
-    if (!config || !config->url) return NULL;
+    if (!config || !config->endpoint) return NULL;
 
-    relay = (rat_http_relay_t *)calloc(1, sizeof(rat_http_relay_t));
+    relay = (rat_tcp_relay_t *)calloc(1, sizeof(rat_tcp_relay_t));
     if (!relay) return NULL;
 
     memset(&sink_cfg, 0, sizeof(sink_cfg));
-    sink_cfg.url = config->url;
-    sink_cfg.token = config->token;
-    sink_cfg.user_agent = config->user_agent;
+    sink_cfg.endpoint = config->endpoint;
 
-    relay->sink = rat_http_sink_create(&sink_cfg);
+    relay->sink = rat_tcp_sink_create(&sink_cfg);
     if (!relay->sink) {
-        rat_http_relay_destroy(relay);
+        rat_tcp_relay_destroy(relay);
         return NULL;
     }
 
@@ -84,18 +82,18 @@ rat_http_relay_t *rat_http_relay_create(const rat_http_relay_config_t *config) {
     return relay;
 }
 
-void rat_http_relay_destroy(rat_http_relay_t *relay) {
+void rat_tcp_relay_destroy(rat_tcp_relay_t *relay) {
     size_t i;
 
     if (!relay) return;
     for (i = 0; i < relay->queue_len; i++) free(relay->queue[i].data);
     free(relay->queue);
-    rat_http_sink_destroy(relay->sink);
+    rat_tcp_sink_destroy(relay->sink);
     free(relay);
 }
 
-rat_http_relay_stats_t rat_http_relay_stats(const rat_http_relay_t *relay) {
-    rat_http_relay_stats_t stats;
+rat_tcp_relay_stats_t rat_tcp_relay_stats(const rat_tcp_relay_t *relay) {
+    rat_tcp_relay_stats_t stats;
 
     memset(&stats, 0, sizeof(stats));
     if (!relay) return stats;
@@ -109,16 +107,16 @@ rat_http_relay_stats_t rat_http_relay_stats(const rat_http_relay_t *relay) {
     return stats;
 }
 
-int rat_http_relay_send_line(rat_http_relay_t *relay, const char *line, size_t len) {
+int rat_tcp_relay_send_line(rat_tcp_relay_t *relay, const char *line, size_t len) {
     char *copy;
 
     if (!relay || !line) return -1;
-    if (rat_http_relay_make_room(relay, len + 1U) != 0) {
+    if (rat_tcp_relay_make_room(relay, len + 1U) != 0) {
         relay->dropped++;
         relay->dropped_bytes += len + 1U;
         return 0;
     }
-    if (rat_http_relay_reserve(relay) != 0) {
+    if (rat_tcp_relay_reserve(relay) != 0) {
         relay->dropped++;
         relay->dropped_bytes += len + 1U;
         return -1;
@@ -140,7 +138,7 @@ int rat_http_relay_send_line(rat_http_relay_t *relay, const char *line, size_t l
     return 1;
 }
 
-int rat_http_relay_flush_now(rat_http_relay_t *relay) {
+int rat_tcp_relay_flush_now(rat_tcp_relay_t *relay) {
     size_t i;
     size_t batch_len = 0;
     char *batch;
@@ -156,7 +154,7 @@ int rat_http_relay_flush_now(rat_http_relay_t *relay) {
     if (i == 0) {
         relay->dropped++;
         relay->dropped_bytes += relay->queue[0].len;
-        rat_http_relay_drop_oldest(relay);
+        rat_tcp_relay_drop_oldest(relay);
         return 0;
     }
 
@@ -172,7 +170,7 @@ int rat_http_relay_flush_now(rat_http_relay_t *relay) {
         batch_len += relay->queue[j].len;
     }
 
-    rc = rat_http_sink_post_chunk(relay->sink, batch, batch_len);
+    rc = rat_tcp_sink_send_chunk(relay->sink, batch, batch_len);
     if (rc != 0) {
         relay->failed_flushes++;
         free(batch);
@@ -191,7 +189,7 @@ int rat_http_relay_flush_now(rat_http_relay_t *relay) {
     return 1;
 }
 
-void rat_http_relay_callback(const char *line, size_t len, void *userdata) {
-    rat_http_relay_t *relay = (rat_http_relay_t *)userdata;
-    (void)rat_http_relay_send_line(relay, line, len);
+void rat_tcp_relay_callback(const char *line, size_t len, void *userdata) {
+    rat_tcp_relay_t *relay = (rat_tcp_relay_t *)userdata;
+    (void)rat_tcp_relay_send_line(relay, line, len);
 }

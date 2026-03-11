@@ -1,0 +1,27 @@
+version = 1
+
+[[annotations]]
+path = [
+  "README.md",
+  "CHANGELOG.md",
+  "_.md",
+  "LICENSE",
+  "package.json",
+  "package-lock.json",
+  "tsconfig.json",
+  "tsup.config.ts",
+  ".gitignore",
+  "src/**/*.ts",
+  "src/**/*.cts",
+  "contract/*.mjs",
+  "contract/cases.tsv",
+  "c/Makefile",
+  "c/include/*.h",
+  "c/src/*.c",
+  "c/examples/*.c",
+  "rust/Cargo.toml",
+  "rust/src/*.rs",
+  "rust/examples/*.rs",
+]
+SPDX-FileCopyrightText = "2026 Alexander R. Croft"
+SPDX-License-Identifier = "MIT"

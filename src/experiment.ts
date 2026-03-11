@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 import Topic from "./topic";
 
 // Simple demo of Topic usage to ensure compile/run works

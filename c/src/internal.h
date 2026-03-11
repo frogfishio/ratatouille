@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Alexander R. Croft */
+/* SPDX-License-Identifier: MIT */
+
 #ifndef RATATOUILLE_INTERNAL_H
 #define RATATOUILLE_INTERNAL_H
 
@@ -23,6 +26,13 @@ struct rat_http_sink {
     uint64_t failed;
 };
 
+struct rat_tcp_sink {
+    char *host;
+    char *port;
+    uint64_t sent;
+    uint64_t failed;
+};
+
 typedef struct rat_queued_line {
     char *data;
     size_t len;
@@ -30,6 +40,23 @@ typedef struct rat_queued_line {
 
 struct rat_http_relay {
     rat_http_sink_t *sink;
+    rat_queued_line_t *queue;
+    size_t queue_len;
+    size_t queue_cap;
+    size_t queued_bytes;
+    size_t batch_bytes;
+    size_t max_queue_bytes;
+    size_t max_queue;
+    rat_drop_policy_t drop_policy;
+    uint64_t dropped;
+    uint64_t dropped_bytes;
+    uint64_t sent_batches;
+    uint64_t sent_bytes;
+    uint64_t failed_flushes;
+};
+
+struct rat_tcp_relay {
+    rat_tcp_sink_t *sink;
     rat_queued_line_t *queue;
     size_t queue_len;
     size_t queue_cap;

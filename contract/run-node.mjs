@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 import fs from "node:fs/promises";
 import path from "node:path";
 import Topic, { setDebug, setPrint } from "../dist/index.node.js";

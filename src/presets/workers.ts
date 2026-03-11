@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // workers.ts
 // Workers (Cloudflare/Service Worker / browser) preset for Ratatouille.
 //

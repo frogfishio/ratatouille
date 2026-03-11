@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // ringtail.shared.ts
 // Shared helpers for shipping Ratatouille envelopes to Ringtail.
 //

@@ -2,4 +2,10 @@ node_modules
 dist
 c/build
 rust/target
-
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+*.log
+*.tmp

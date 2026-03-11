@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // relay.ts
 // Relay class for maintaining a connection to a log collector with non-blocking queue and periodic flush.
 

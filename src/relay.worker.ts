@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // relay.worker.ts
 // Worker-friendly Relay that batches lines and POSTs via fetch. No Node built-ins.
 

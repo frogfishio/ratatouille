@@ -132,7 +132,7 @@ Notes:
 
 - `meta` and `env` are optional.
 - `src` is optional but strongly recommended for distributed deployments.
-- Language-native producer APIs may narrow or widen payload types. For example, the initial C MVP emits a single string payload in `args`.
+- Language-native producer APIs may narrow or widen payload types. For example, the C API currently emits a single string payload in `args`.
 
 ### Shared contract corpus
 
@@ -184,7 +184,7 @@ pnpm add @frogfish/ratatouille
 
 If you want a diskless local collector + tailer, pair this with **Ringtail** (NDJSON sink + `tail`).
 
-### C (MVP)
+### C
 
 The repository now includes a minimal-dependency C implementation in `c/`.
 
@@ -195,7 +195,7 @@ make -C c example
 ./c/build/basic
 ```
 
-Current C scope:
+Supports:
 
 - topic filtering with DEBUG-style wildcards
 - per-topic sequence counters
@@ -203,9 +203,11 @@ Current C scope:
 - stdout sink and callback sink API
 - plain HTTP POSIX sink for Ringtail-compatible NDJSON shipping
 - bounded HTTP relay with queueing and explicit batch flush
+- plain TCP sink for raw NDJSON shipping
+- bounded TCP relay with queueing and explicit batch flush
 - zero external dependencies
 
-### Rust (MVP)
+### Rust
 
 The repository now also includes a zero-dependency Rust crate in `rust/`.
 
@@ -215,13 +217,14 @@ Build and run the example:
 cargo run --manifest-path rust/Cargo.toml --example basic
 ```
 
-Current Rust scope:
+Supports:
 
 - topic filtering with DEBUG-style wildcards
 - per-topic sequence counters
 - text and NDJSON output modes
 - stdout sink and custom sink trait support
 - plain HTTP sink and bounded explicit-flush relay
+- plain TCP sink and bounded explicit-flush relay
 - zero external dependencies beyond Rust std
 
 ---
@@ -246,13 +249,13 @@ fn main() {
 }
 ```
 
-The initial Rust implementation mirrors the same behavioral contract as Node and C, but with Rust-native APIs and ownership rules.
+The Rust implementation mirrors the same behavioral contract as Node and C, but with Rust-native APIs and ownership rules.
 
 ### Rust HTTP transport
 
 The Rust crate now includes a std-only plain HTTP sink and a bounded explicit-flush relay.
 
-Scope:
+Current limits:
 
 - `http://` only
 - no TLS
@@ -277,6 +280,41 @@ let relay = HttpRelay::new(HttpRelayConfig {
   max_queue_bytes: 65536,
   max_queue: 128,
   ..HttpRelayConfig::default()
+})?;
+
+let mut cfg = LoggerConfig::default();
+cfg.filter = Some("api*".into());
+cfg.format = Format::Ndjson;
+
+let mut log = Logger::with_sink(cfg, relay);
+let _ = log.log("api", "queued one");
+let _ = log.log("api", "queued two");
+let _ = log.sink_mut().flush_now()?;
+# Ok::<(), std::io::Error>(())
+```
+
+### Rust TCP transport
+
+The Rust crate also includes a std-only plain TCP sink and a bounded explicit-flush relay.
+
+Current limits:
+
+- `tcp://host:port` only
+- no background thread
+- bounded in-memory queue on the relay path
+- explicit `flush_now()` for batch delivery
+
+Example:
+
+```rust
+use ratatouille::{Format, Logger, LoggerConfig, TcpRelay, TcpRelayConfig};
+
+let relay = TcpRelay::new(TcpRelayConfig {
+  endpoint: "tcp://127.0.0.1:9000".into(),
+  batch_bytes: 4096,
+  max_queue_bytes: 65536,
+  max_queue: 128,
+  ..TcpRelayConfig::default()
 })?;
 
 let mut cfg = LoggerConfig::default();
@@ -316,13 +354,33 @@ int main(void) {
 }
 ```
 
-The initial C implementation is intentionally small. It does not include the Relay transport yet; it gives you the hot-path producer, filter, sequence tracking, and stable line formatting first.
+The C implementation stays intentionally small, but it now includes both HTTP and TCP shipping paths alongside the hot-path producer, filter, sequence tracking, and stable line formatting.
+
+### C TCP transport
+
+The C library now includes a POSIX plain TCP sink and a bounded explicit-flush TCP relay.
+
+Current limits:
+
+- `tcp://host:port` only
+- no TLS
+- no background thread
+- bounded in-memory queue on the relay path
+- explicit `rat_tcp_relay_flush_now()` for batch delivery
+
+Build the examples:
+
+```bash
+make -C c example
+./c/build/tcp_sink_example
+./c/build/tcp_relay_example
+```
 
 ### C HTTP sink
 
 The C library now includes a minimal plain-HTTP POSIX sink for local or trusted-network shipping.
 
-Scope:
+Current limits:
 
 - `http://` only
 - no TLS
@@ -369,7 +427,7 @@ This is the C equivalent of the Node relay model at a smaller scope:
 - flush happens when you call `rat_http_relay_flush_now()`
 - one flush may POST multiple NDJSON lines in a single request
 
-This first version is still intentionally narrow:
+Current limits:
 
 - `http://` only
 - no TLS
@@ -1353,6 +1411,6 @@ No suffix → uncolored topic. `#random` → assign a stable 256‑color from a 
 ---
 
 ## License
-GPL-3.0-only
+MIT
 
-**Commercial** license for proprietary redistribution/hosted offerings. Please contact info@frogfish.io
+Copyright (c) 2026 Alexander R. Croft

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // ringtail.worker.ts (Workers/browser)
 // Workers/browser wrapper for the Ringtail transport.
 //

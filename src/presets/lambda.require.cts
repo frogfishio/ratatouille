@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 const lambdaModule = require("./lambda");
 
 const createLambdaFactory = lambdaModule.default ?? lambdaModule;

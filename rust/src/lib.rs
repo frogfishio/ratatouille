@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::collections::VecDeque;
@@ -70,8 +73,19 @@ pub struct HttpSinkConfig {
     pub user_agent: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TcpSinkConfig {
+    pub endpoint: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HttpSinkStats {
+    pub sent: u64,
+    pub failed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TcpSinkStats {
     pub sent: u64,
     pub failed: u64,
 }
@@ -81,6 +95,15 @@ pub struct HttpRelayConfig {
     pub url: String,
     pub token: Option<String>,
     pub user_agent: Option<String>,
+    pub batch_bytes: usize,
+    pub max_queue_bytes: usize,
+    pub max_queue: usize,
+    pub drop_policy: DropPolicy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TcpRelayConfig {
+    pub endpoint: String,
     pub batch_bytes: usize,
     pub max_queue_bytes: usize,
     pub max_queue: usize,
@@ -101,8 +124,31 @@ impl Default for HttpRelayConfig {
     }
 }
 
+impl Default for TcpRelayConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            batch_bytes: 262_144,
+            max_queue_bytes: 5_242_880,
+            max_queue: 10_000,
+            drop_policy: DropPolicy::DropOldest,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HttpRelayStats {
+    pub queued: u64,
+    pub queued_bytes: u64,
+    pub dropped: u64,
+    pub dropped_bytes: u64,
+    pub sent_batches: u64,
+    pub sent_bytes: u64,
+    pub failed_flushes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TcpRelayStats {
     pub queued: u64,
     pub queued_bytes: u64,
     pub dropped: u64,
@@ -174,6 +220,12 @@ pub struct HttpSink {
     stats: HttpSinkStats,
 }
 
+pub struct TcpSink {
+    host: String,
+    port: String,
+    stats: TcpSinkStats,
+}
+
 pub struct HttpRelay {
     sink: HttpSink,
     queue: VecDeque<Vec<u8>>,
@@ -183,6 +235,17 @@ pub struct HttpRelay {
     max_queue: usize,
     drop_policy: DropPolicy,
     stats: HttpRelayStats,
+}
+
+pub struct TcpRelay {
+    sink: TcpSink,
+    queue: VecDeque<Vec<u8>>,
+    queued_bytes: usize,
+    batch_bytes: usize,
+    max_queue_bytes: usize,
+    max_queue: usize,
+    drop_policy: DropPolicy,
+    stats: TcpRelayStats,
 }
 
 pub struct Logger<S: Sink = StdoutSink> {
@@ -347,6 +410,50 @@ impl Sink for HttpSink {
     }
 }
 
+impl TcpSink {
+    pub fn new(config: TcpSinkConfig) -> io::Result<Self> {
+        let (host, port) = parse_tcp_endpoint(&config.endpoint)?;
+        Ok(Self {
+            host,
+            port,
+            stats: TcpSinkStats::default(),
+        })
+    }
+
+    pub fn stats(&self) -> TcpSinkStats {
+        self.stats
+    }
+
+    pub fn send(&mut self, line: &str) -> io::Result<()> {
+        let mut body = Vec::with_capacity(line.len() + 1);
+        body.extend_from_slice(line.as_bytes());
+        body.push(b'\n');
+        self.send_chunk(&body)
+    }
+
+    pub fn send_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
+        let address = format!("{}:{}", self.host, self.port);
+        let mut stream = TcpStream::connect(address).inspect_err(|_| {
+            self.stats.failed += 1;
+        })?;
+        stream.write_all(chunk).inspect_err(|_| {
+            self.stats.failed += 1;
+        })?;
+        stream.flush().inspect_err(|_| {
+            self.stats.failed += 1;
+        })?;
+
+        self.stats.sent += 1;
+        Ok(())
+    }
+}
+
+impl Sink for TcpSink {
+    fn write_line(&mut self, line: &str) {
+        let _ = self.send(line);
+    }
+}
+
 impl HttpRelay {
     pub fn new(config: HttpRelayConfig) -> io::Result<Self> {
         if config.url.is_empty() {
@@ -465,6 +572,127 @@ impl HttpRelay {
 }
 
 impl Sink for HttpRelay {
+    fn write_line(&mut self, line: &str) {
+        let _ = self.send_line(line);
+    }
+}
+
+impl TcpRelay {
+    pub fn new(config: TcpRelayConfig) -> io::Result<Self> {
+        if config.endpoint.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "relay endpoint is empty"));
+        }
+
+        Ok(Self {
+            sink: TcpSink::new(TcpSinkConfig {
+                endpoint: config.endpoint,
+            })?,
+            queue: VecDeque::new(),
+            queued_bytes: 0,
+            batch_bytes: config.batch_bytes.max(1),
+            max_queue_bytes: config.max_queue_bytes.max(1),
+            max_queue: config.max_queue.max(1),
+            drop_policy: config.drop_policy,
+            stats: TcpRelayStats::default(),
+        })
+    }
+
+    pub fn stats(&self) -> TcpRelayStats {
+        let mut stats = self.stats;
+        stats.queued = self.queue.len() as u64;
+        stats.queued_bytes = self.queued_bytes as u64;
+        stats
+    }
+
+    pub fn send_line(&mut self, line: &str) -> io::Result<bool> {
+        self.send_chunk(line.as_bytes())
+    }
+
+    pub fn send_chunk(&mut self, chunk: &[u8]) -> io::Result<bool> {
+        let mut data = Vec::with_capacity(chunk.len() + 1);
+        data.extend_from_slice(chunk);
+        if !data.ends_with(b"\n") {
+            data.push(b'\n');
+        }
+
+        if data.len() > self.batch_bytes {
+            self.stats.dropped += 1;
+            self.stats.dropped_bytes += data.len() as u64;
+            return Ok(false);
+        }
+
+        while (self.queue.len() >= self.max_queue || self.queued_bytes + data.len() > self.max_queue_bytes)
+            && !self.queue.is_empty()
+        {
+            if self.drop_policy == DropPolicy::DropNewest {
+                self.stats.dropped += 1;
+                self.stats.dropped_bytes += data.len() as u64;
+                return Ok(false);
+            }
+            self.drop_oldest();
+        }
+
+        if self.queue.len() >= self.max_queue || self.queued_bytes + data.len() > self.max_queue_bytes {
+            self.stats.dropped += 1;
+            self.stats.dropped_bytes += data.len() as u64;
+            return Ok(false);
+        }
+
+        self.queued_bytes += data.len();
+        self.queue.push_back(data);
+        Ok(true)
+    }
+
+    pub fn flush_now(&mut self) -> io::Result<bool> {
+        if self.queue.is_empty() {
+            return Ok(false);
+        }
+
+        let mut batch = Vec::new();
+        let mut count = 0usize;
+        for line in &self.queue {
+            if batch.len() + line.len() > self.batch_bytes {
+                break;
+            }
+            batch.extend_from_slice(line);
+            count += 1;
+        }
+
+        if count == 0 {
+            if let Some(line) = self.queue.pop_front() {
+                self.queued_bytes = self.queued_bytes.saturating_sub(line.len());
+                self.stats.dropped += 1;
+                self.stats.dropped_bytes += line.len() as u64;
+            }
+            return Ok(false);
+        }
+
+        if let Err(err) = self.sink.send_chunk(&batch) {
+            self.stats.failed_flushes += 1;
+            return Err(err);
+        }
+
+        for _ in 0..count {
+            if let Some(line) = self.queue.pop_front() {
+                self.queued_bytes = self.queued_bytes.saturating_sub(line.len());
+            }
+        }
+
+        self.stats.sent_batches += 1;
+        self.stats.sent_bytes += batch.len() as u64;
+        Ok(true)
+    }
+
+    fn drop_oldest(&mut self) {
+        if let Some(line) = self.queue.pop_front() {
+            self.queued_bytes = self.queued_bytes.saturating_sub(line.len());
+            self.stats.dropped += 1;
+            self.stats.dropped_bytes += line.len() as u64;
+        }
+    }
+}
+
+impl Sink for TcpRelay {
     fn write_line(&mut self, line: &str) {
         let _ = self.send_line(line);
     }
@@ -596,6 +824,24 @@ fn parse_http_url(url: &str) -> io::Result<(String, String, String)> {
     };
 
     Ok((host, port, path.to_owned()))
+}
+
+fn parse_tcp_endpoint(endpoint: &str) -> io::Result<(String, String)> {
+    let rest = endpoint
+        .strip_prefix("tcp://")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "only tcp:// endpoints are supported"))?;
+    if rest.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "tcp endpoint is empty"));
+    }
+
+    let (host, port) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "tcp endpoint must include host:port"))?;
+    if host.is_empty() || port.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid tcp endpoint"));
+    }
+
+    Ok((host.to_owned(), port.to_owned()))
 }
 
 fn http_status_ok(bytes: &[u8]) -> bool {

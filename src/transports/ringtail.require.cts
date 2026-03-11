@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 const ringtailModule = require("./ringtail");
 
 const createRingtailTransport = ringtailModule.default ?? ringtailModule;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 use ratatouille::{Format, Logger, LoggerConfig, SourceIdentity};
 
 fn main() {

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alexander R. Croft
+// SPDX-License-Identifier: MIT
+
 // ringtail.ts (Node)
 // Node wrapper for the Ringtail transport.
 //
